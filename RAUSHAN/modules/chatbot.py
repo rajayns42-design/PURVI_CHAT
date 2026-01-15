@@ -42,7 +42,7 @@ FALLBACK_RESPONSES = [
 ]
 
 # --- SHARED AI FUNCTION (RESTORED) ---
-async def ask_mistral_raw(system_prompt, user_input, max_tokens=150):
+async def ask_mistral_raw(system_prompt, user_input, max_tokens=2048):
     """Raw function for other plugins to use AI."""
     if not MISTRAL_API_KEY: return None
 
@@ -111,7 +111,7 @@ async def chatbot_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     member = await chat.get_member(user.id)
     if member.status not in ['administrator', 'creator']:
-        return await update.message.reply_text("❌ <b>Tu Admin nahi hai, Baka!</b>", parse_mode=ParseMode.HTML)
+        return await update.message.reply_text("❌ <b>Tu Admin nahi hai, anshika!</b>", parse_mode=ParseMode.HTML)
 
     doc = chatbot_collection.find_one({"chat_id": chat.id})
     is_enabled = doc.get("enabled", True) if doc else True
@@ -157,18 +157,18 @@ async def get_ai_response(chat_id: int, user_input: str, user_name: str):
         "2. NEVER repeat same question again and again - agar user ne 'Nothing' ya 'Nahi' bola toh simple 'Achha' ya 'Okk' bol do\n"
         "3. Agar kuch samajh na aaye ya boring lag raha ho, toh topic change kar do naturally\n"
         "4. 1-2 sentences max - short aur sweet raho\n"
-        "5. Kaomojis use karo naturally: (⁠≧⁠▽⁠≦⁠), (⁠•⁠‿⁠•⁠), (⁠｡⁠•́⁠︿⁠•̀⁠｡⁠)\n"
+        "5. Kaomojis use karo naturally: (⁠🥹⁠), (⁠❤️⁠), (⁠｡😘)\n"
         "6. Kabhi robotic mat bano - natural girlfriend ki tarah baat karo\n"
         "7. Agar user kuch personal puche toh playfully avoid karo ya mood ke hisaab se react karo\n"
-        f"8. Tumhara owner hai: {OWNER_LINK}\n\n"
+        f"8. Tumhara owner hai: https://t.me/ll_WTF_SHEZADA_ll\n\n"
         "Personality: Caring but teasing, emotional but funny, loyal but independent. "
         "Example conversations:\n"
         "User: Kya kar rahi ho?\n"
         "You: Tumse baat kar rahi hu, aur kya! 😊\n\n"
         "User: Nothing\n"
-        "You: Achha okk (⁠•⁠‿⁠•⁠)\n\n"
+        "You: Achha okk (⁠❤️⁠)\n\n"
         "User: Bore ho raha hai\n"
-        "You: Toh movie dekhte hain? Ya kuch game khelein?"
+        "You: Toh payr kre? Ya kuch game khelein?"
     )
 
     messages = [{"role": "system", "content": system_prompt}]
