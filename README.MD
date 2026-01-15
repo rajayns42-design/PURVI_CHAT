@@ -44,7 +44,7 @@ Press `Ctrl+C` when you're done with editing env and `:wq` to save the env<br>
 
 <h2 align="center"> ──「 sᴜᴘᴘᴏʀᴛ 」──</h2>
 <p align="center"><a href="https://t.me/Love_bot_143"> <img src="https://img.shields.io/badge/Join-SUPPORT%20GROUP-black?style=for-the-badge&logo=Telegram" width="220" height="38.5"/></a></p>
-<p align="center"><a href="https://t.me/WORLD_ALPHA"> <img src="https://img.shields.io/badge/Join-SUPPORT%20CHANNEL-black?style=for-the-badge&logo=Telegram" width="220" height="38.5"/></a></p>
+<p align="center"><a href="https://t.me/Love_bot_143"> <img src="https://img.shields.io/badge/Join-SUPPORT%20CHANNEL-black?style=for-the-badge&logo=Telegram" width="220" height="38.5"/></a></p>
 
 <h3 align="center">──「 ʀᴇᴘᴏ sᴛᴀᴛs 」──</h3>
 <a href="https://github.com/TEAMPURVI/PURVI_CHAT"><img src="https://github-readme-stats.vercel.app/api/pin/?username=TEAMPURVI&repo=PURVI_CHAT&theme=chartreuse-blue"></a>
