@@ -82,7 +82,7 @@ async def ask_mistral(messages, max_tokens=120):
 
     return "Net slow hai yaar... 😅"
 
-async def send_ai_sticker(ambot: Ambot, message):
+async def send_ai_sticker(ambot, message):
     try:
         pack = random.choice(STICKER_PACKS)
         sticker_set = await client.get_sticker_set(pack)
