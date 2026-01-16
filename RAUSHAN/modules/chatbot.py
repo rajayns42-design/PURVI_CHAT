@@ -3,9 +3,9 @@ import random
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from Anshika.config import MISTRAL_API_KEY, BOT_NAME, OWNER_LINK
-from Anshika.database import chatbot_collection
-from Anshika.utils import stylize_text
+from Baka.config import MISTRAL_API_KEY, BOT_NAME, OWNER_LINK
+from Baka.database import chatbot_collection
+from Baka.utils import stylize_text
 
 # ---------------- CONFIG ----------------
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
