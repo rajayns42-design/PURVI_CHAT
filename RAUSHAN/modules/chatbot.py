@@ -162,7 +162,7 @@ async def get_ai_response(chat_id: int, user_input: str):
 
 # ---------------- MENU ----------------
 
-@Ambot.on_message(filters.command("chatbot"))
+@application.add_handler(CommandHandler("chatbot", chatbot_handler))
 async def chatbot_menu(ambot: Ambot, message):
     chat = message.chat
     user = message.from_user
