@@ -4,12 +4,12 @@ import httpx
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import MongoClient
+from pymongo import Mongoambot
 
 # ---------------- ENV CONFIG ----------------
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 BOT_NAME = os.getenv("BOT_NAME", "Anshika")
-OWNER_LINK = os.getenv("OWNER_LINK", "https://t.me/yourusername")
+OWNER_LINK = os.getenv("OWNER_LINK", "https://t.me/ll_WTF_SHEZADA_ll")
 MONGO_URL = os.getenv("MONGO_URL")
 
 # ---------------- DB ----------------
@@ -81,7 +81,7 @@ async def ask_mistral(messages, max_tokens=120):
 
     return "Net slow hai yaar... 😅"
 
-async def send_ai_sticker(client: Client, message):
+async def send_ai_sticker(ambot: Ambot, message):
     try:
         pack = random.choice(STICKER_PACKS)
         sticker_set = await client.get_sticker_set(pack)
@@ -161,8 +161,8 @@ async def get_ai_response(chat_id: int, user_input: str):
 
 # ---------------- MENU ----------------
 
-@Client.on_message(filters.command("chatbot"))
-async def chatbot_menu(client: Client, message):
+@Ambot.on_message(filters.command("chatbot"))
+async def chatbot_menu(ambot: Ambot, message):
     chat = message.chat
     user = message.from_user
 
@@ -190,8 +190,8 @@ async def chatbot_menu(client: Client, message):
         reply_markup=kb
     )
 
-@Client.on_callback_query(filters.regex("^ai_"))
-async def chatbot_callback(client: Client, cq):
+@Ambot.on_callback_query(filters.regex("^ai_"))
+async def chatbot_callback(ambit: ambot, cq):
     if not chatbot_collection:
         return await cq.answer("DB not connected", show_alert=True)
 
@@ -214,8 +214,8 @@ async def chatbot_callback(client: Client, cq):
 
 # ---------------- MAIN CHAT HANDLER ----------------
 
-@Client.on_message(filters.text & ~filters.command)
-async def ai_message_handler(client: Client, message):
+@Ambot.on_message(filters.text & ~filters.command)
+async def ai_message_handler(ambot: Ambit, message):
     chat = message.chat
     text = message.text or ""
 
@@ -236,7 +236,7 @@ async def ai_message_handler(client: Client, message):
         elif bot_username and f"@{bot_username}" in text.lower():
             should_reply = True
             text = text.replace(f"@{bot_username}", "")
-        elif any(text.lower().startswith(w) for w in ["hey", "hi", "sun", "oye", "baka", "ai", "hello", "baby", "babu", "oi"]):
+        elif any(text.lower().startswith(w) for w in ["hey", "hi", "sun", "oye", "anshika", "ai", "hello", "baby", "babu", "oi"]):
             should_reply = True
 
     if not should_reply:
@@ -247,16 +247,16 @@ async def ai_message_handler(client: Client, message):
     await message.reply_text(stylize_text(res))
 
     if random.random() < 0.30:
-        await send_ai_sticker(client, message)
+        await send_ai_sticker(Ambot, message)
 
 # ---------------- /ask COMMAND ----------------
 
-@Client.on_message(filters.command("ask"))
-async def ask_ai(client: Client, message):
+@Ambot.on_message(filters.command("ask"))
+async def ask_ai(ambit: Ambot, message):
     if len(message.command) < 2:
         return await message.reply_text("🗣️ Bol kuch: /ask Kya chal raha hai?")
 
-    await client.send_chat_action(message.chat.id, ChatAction.TYPING)
+    await ambot.send_chat_action(message.chat.id, ChatAction.TYPING)
     query = " ".join(message.command[1:])
     res = await get_ai_response(message.chat.id, query)
     await message.reply_text(stylize_text(res))
