@@ -1,11 +1,24 @@
 import os
 import random
+import httpx
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from Baka.config import MISTRAL_API_KEY, BOT_NAME, OWNER_LINK
-from Baka.database import chatbot_collection
-from Baka.utils import stylize_text
+from pymongo import MongoClient
+
+# ---------------- ENV CONFIG ----------------
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+BOT_NAME = os.getenv("BOT_NAME", "Anshika")
+OWNER_LINK = os.getenv("OWNER_LINK", "https://t.me/yourusername")
+MONGO_URL = os.getenv("MONGO_URL")
+
+# ---------------- DB ----------------
+db = None
+chatbot_collection = None
+if MONGO_URL:
+    mongo = MongoClient(MONGO_URL)
+    db = mongo["chatbot"]
+    chatbot_collection = db["chats"]
 
 # ---------------- CONFIG ----------------
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
@@ -38,11 +51,14 @@ FALLBACK_RESPONSES = [
     "Achha theek hai (⁠❤️⁠)"
 ]
 
-# ---------------- AI CORE ----------------
+# ---------------- HELPERS ----------------
 
-async def ask_mistral(messages, max_tokens=2020):
+def stylize_text(text):
+    return text  # aap yaha apna fancy stylizer laga sakte ho
+
+async def ask_mistral(messages, max_tokens=120):
     if not MISTRAL_API_KEY:
-        return "⚠️ API Key missing"
+        return "⚠️ Mistral API key missing"
 
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
@@ -56,8 +72,8 @@ async def ask_mistral(messages, max_tokens=2020):
     }
 
     try:
-        async with httpx.Asyncambot(timeout=15) as ambot:
-            r = await ambot.post(MISTRAL_URL, headers=headers, json=payload)
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(MISTRAL_URL, headers=headers, json=payload)
             if r.status_code == 200:
                 return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
@@ -65,13 +81,10 @@ async def ask_mistral(messages, max_tokens=2020):
 
     return "Net slow hai yaar... 😅"
 
-
-# ---------------- STICKER SENDER ----------------
-
-async def send_ai_sticker(Ambot: Ambot, message):
+async def send_ai_sticker(client: Client, message):
     try:
         pack = random.choice(STICKER_PACKS)
-        sticker_set = await a.get_sticker_set(pack)
+        sticker_set = await client.get_sticker_set(pack)
         sticker = random.choice(sticker_set.stickers)
         await message.reply_sticker(sticker.file_id)
         return True
@@ -79,25 +92,25 @@ async def send_ai_sticker(Ambot: Ambot, message):
         print("Sticker error:", e)
         return False
 
-
-# ---------------- AI RESPONSE ENGINE ----------------
+# ---------------- AI ENGINE ----------------
 
 async def get_ai_response(chat_id: int, user_input: str):
-    if not MISTRAL_API_KEY:
-        return "⚠️ API Key Missing"
+    history = []
+    enabled = True
 
-    doc = chatbot_collection.find_one({"chat_id": chat_id}) or {}
-    history = doc.get("history", [])
+    if chatbot_collection:
+        doc = chatbot_collection.find_one({"chat_id": chat_id}) or {}
+        history = doc.get("history", [])
+        enabled = doc.get("enabled", True)
 
     system_prompt = (
-        f"Tum {BOT_NAME} ho — ek cute, sassy Indian girlfriend jo naturally Hinglish bolti hai.\n"
-        "RULES:\n"
-        "1. Sirf Hinglish (Hindi + English mix)\n"
-        "2. Repeat questions mat karo\n"
-        "3. 1–2 lines max\n"
+        f"Tum {BOT_NAME} ho — ek cute, sassy Indian girlfriend jo Hinglish bolti hai.\n"
+        "Rules:\n"
+        "1. Sirf Hinglish\n"
+        "2. 1–2 lines max\n"
+        "3. Repeat questions mat karo\n"
         "4. Kaomojis use karo: (⁠🥹⁠) (⁠❤️⁠) (⁠｡😘)\n"
-        "5. Robotic mat bano\n"
-        f"6. Owner: https://t.me/ll_WTF_SHEZADA_ll\n\n"
+        "5. Natural aur playful raho\n\n"
         "Examples:\n"
         "User: Kya kar rahi ho?\n"
         "You: Tumse baat kar rahi hu aur kya 😊\n\n"
@@ -130,37 +143,37 @@ async def get_ai_response(chat_id: int, user_input: str):
         reply = random.choice(FALLBACK_RESPONSES)
 
     # -------- SAVE HISTORY --------
-    new_hist = history + [
-        {"role": "user", "content": user_input},
-        {"role": "assistant", "content": reply}
-    ]
-    if len(new_hist) > MAX_HISTORY * 2:
-        new_hist = new_hist[-MAX_HISTORY * 2:]
+    if chatbot_collection:
+        new_hist = history + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": reply}
+        ]
+        if len(new_hist) > MAX_HISTORY * 2:
+            new_hist = new_hist[-MAX_HISTORY * 2:]
 
-    chatbot_collection.update_one(
-        {"chat_id": chat_id},
-        {"$set": {"history": new_hist}},
-        upsert=True
-    )
+        chatbot_collection.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"history": new_hist}},
+            upsert=True
+        )
 
     return reply
 
+# ---------------- MENU ----------------
 
-# ---------------- MENU COMMAND ----------------
-
-@Ambot.on_message(filters.command("chatbot"))
-async def chatbot_menu(ambot: Ambot, message):
+@Client.on_message(filters.command("chatbot"))
+async def chatbot_menu(client: Client, message):
     chat = message.chat
     user = message.from_user
 
     if chat.type == ChatType.PRIVATE:
-        return await message.reply_text("🧠 <b>Haan baba, DM me active hu!</b> 😉")
+        return await message.reply_text("🧠 Haan baba, DM me active hu 😉")
 
     member = await client.get_chat_member(chat.id, user.id)
     if member.status not in ("administrator", "creator"):
-        return await message.reply_text("❌ <b>Tu admin nahi hai!</b>")
+        return await message.reply_text("❌ Tu admin nahi hai!")
 
-    doc = chatbot_collection.find_one({"chat_id": chat.id})
+    doc = chatbot_collection.find_one({"chat_id": chat.id}) if chatbot_collection else {}
     is_enabled = doc.get("enabled", True) if doc else True
     status = "🟢 Enabled" if is_enabled else "🔴 Disabled"
 
@@ -173,15 +186,15 @@ async def chatbot_menu(ambot: Ambot, message):
     ])
 
     await message.reply_text(
-        f"🤖 <b>AI Settings</b>\nStatus: {status}\n<i>She is active by default!</i>",
+        f"🤖 AI Settings\nStatus: {status}\nShe is active by default!",
         reply_markup=kb
     )
 
+@Client.on_callback_query(filters.regex("^ai_"))
+async def chatbot_callback(client: Client, cq):
+    if not chatbot_collection:
+        return await cq.answer("DB not connected", show_alert=True)
 
-# ---------------- CALLBACK HANDLER ----------------
-
-@Ambot.on_callback_query(filters.regex("^ai_"))
-async def chatbot_callback(ambot: Ambot, cq):
     member = await client.get_chat_member(cq.message.chat.id, cq.from_user.id)
     if member.status not in ("administrator", "creator"):
         return await cq.answer("❌ Sirf admin!", show_alert=True)
@@ -191,19 +204,18 @@ async def chatbot_callback(ambot: Ambot, cq):
 
     if data == "ai_enable":
         chatbot_collection.update_one({"chat_id": chat_id}, {"$set": {"enabled": True}}, upsert=True)
-        await cq.message.edit_text("✅ <b>Enabled!</b>\n<i>Ab ayega maza 😏</i>")
+        await cq.message.edit_text("✅ Enabled! 😏")
     elif data == "ai_disable":
         chatbot_collection.update_one({"chat_id": chat_id}, {"$set": {"enabled": False}}, upsert=True)
-        await cq.message.edit_text("❌ <b>Disabled!</b>\n<i>Ja rahi hu... 🥺</i>")
+        await cq.message.edit_text("❌ Disabled! 🥺")
     elif data == "ai_reset":
         chatbot_collection.update_one({"chat_id": chat_id}, {"$set": {"history": []}}, upsert=True)
         await cq.answer("🧠 Sab bhool gayi main!", show_alert=True)
 
+# ---------------- MAIN CHAT HANDLER ----------------
 
-# ---------------- MAIN MESSAGE HANDLER ----------------
-
-@Ambot.on_message(filters.text & ~filters.command)
-async def ai_message_handler(ambot: Ambot, message):
+@Client.on_message(filters.text & ~filters.command)
+async def ai_message_handler(client: Client, message):
     chat = message.chat
     text = message.text or ""
 
@@ -212,42 +224,39 @@ async def ai_message_handler(ambot: Ambot, message):
     if chat.type == ChatType.PRIVATE:
         should_reply = True
     else:
-        doc = chatbot_collection.find_one({"chat_id": chat.id})
+        doc = chatbot_collection.find_one({"chat_id": chat.id}) if chatbot_collection else {}
         is_enabled = doc.get("enabled", True) if doc else True
         if not is_enabled:
             return
 
-        bot_username = (await ambot.get_me()).username.lower()
-        if message.reply_to_message and message.reply_to_message.from_user.id == (await ambot.get_me()).id:
+        me = await client.get_me()
+        bot_username = me.username.lower() if me.username else ""
+        if message.reply_to_message and message.reply_to_message.from_user.id == me.id:
             should_reply = True
-        elif f"@{bot_username}" in text.lower():
+        elif bot_username and f"@{bot_username}" in text.lower():
             should_reply = True
             text = text.replace(f"@{bot_username}", "")
-        elif any(text.lower().startswith(w) for w in ["hey", "hi", "sun", "oye", "anshika", "ai", "hello", "baby", "babu", "oi"]):
+        elif any(text.lower().startswith(w) for w in ["hey", "hi", "sun", "oye", "baka", "ai", "hello", "baby", "babu", "oi"]):
             should_reply = True
 
     if not should_reply:
         return
 
-    await Ambot.send_chat_action(chat.id, ChatAction.TYPING)
-
+    await client.send_chat_action(chat.id, ChatAction.TYPING)
     res = await get_ai_response(chat.id, text.strip() or "Hi")
     await message.reply_text(stylize_text(res))
 
-    # 30% chance sticker
     if random.random() < 0.30:
-        await send_ai_sticker(ambot, message)
-
+        await send_ai_sticker(client, message)
 
 # ---------------- /ask COMMAND ----------------
 
-@Ambot.on_message(filters.command("ask"))
-async def ask_ai(ambot: Ambot, message):
+@Client.on_message(filters.command("ask"))
+async def ask_ai(client: Client, message):
     if len(message.command) < 2:
-        return await message.reply_text("🗣️ <b>Bol kuch:</b> <code>/ask Kya chal raha hai?</code>")
+        return await message.reply_text("🗣️ Bol kuch: /ask Kya chal raha hai?")
 
-    await Ambot.send_chat_action(message.chat.id, ChatAction.TYPING)
+    await client.send_chat_action(message.chat.id, ChatAction.TYPING)
     query = " ".join(message.command[1:])
     res = await get_ai_response(message.chat.id, query)
     await message.reply_text(stylize_text(res))
-       
