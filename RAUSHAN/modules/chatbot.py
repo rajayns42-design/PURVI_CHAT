@@ -4,7 +4,8 @@ import httpx
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import Mongoambot
+from pymongo import MongoClient
+
 
 # ---------------- ENV CONFIG ----------------
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
