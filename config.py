@@ -12,7 +12,7 @@ MONGO_URL = getenv("MONGO_URL", None)
 SUPPORT_GRP = getenv("SUPPORT_GRP", "Love_Ki_Duniyaa")
 UPDATE_CHNL = getenv("UPDATE_CHNL", "Love_bot_143")
 OWNER_USERNAME = getenv("OWNER_USERNAME", "ll_WTF_SHEZADA_ll")
-MISTRAL_API_KEY = getenv("MISTRAL_API_KEY", "your api key")
+MISTRAL_API_KEY = getenv("MISTRAL_API_KEY", "uPsyariDhh2UwyF5TvgEkWbIhH0HDhFa")
 
 # Random Start Images
 IMG = [
