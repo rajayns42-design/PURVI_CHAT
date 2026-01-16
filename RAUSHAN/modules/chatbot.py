@@ -1,5 +1,5 @@
-# =========================
-# 💖 ANSHIKA AI GIRLFRIEND BOT v4.6 (FINAL PRODUCTION BUILD)
+   # =========================
+# 💖 ANSHIKA AI GIRLFRIEND BOT v5.0 (ULTIMATE)
 # =========================
 
 import os
@@ -9,7 +9,7 @@ import re
 import httpx
 import uuid
 from collections import defaultdict, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatPermissions
@@ -22,7 +22,7 @@ OWNER_LINK = os.getenv("OWNER_LINK", "https://t.me/ll_WTF_SHEZADA_ll")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 MONGO_URL = os.getenv("MONGO_URL")
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
-UPI_ID = os.getenv("UPI_ID", "example@upi")
+UPI_ID = os.getenv("UPI_ID")
 
 # ---------------- CLIENT ----------------
 app = Client("ai_chatbot")
@@ -45,10 +45,9 @@ if MONGO_URL:
         chatbot_collection.create_index([("xp", -1)])
         payments_collection.create_index([("order_id", 1)], unique=True)
         subscriptions_collection.create_index([("user_id", 1)], unique=True)
-
         print("✅ MongoDB connected")
     except Exception as e:
-        print("❌ MongoDB failed:", e)
+        print("❌ MongoDB connection failed:", e)
         chatbot_collection = None
 
 # ---------------- CONFIG ----------------
@@ -89,27 +88,28 @@ XP_THRESHOLDS = {
     "married": 700
 }
 
+JEALOUSY_TRIGGERS = ["she", "her", "another girl", "other girl", "ex", "crush", "gf", "wife"]
+
 # ---------------- MEMORY ----------------
 spam_tracker = defaultdict(lambda: deque(maxlen=SPAM_LIMIT))
 abuse_tracker = defaultdict(int)
-pending_proposal = set()
+pending_nsfw = set()
+pending_marriage = set()
 pending_breakup = set()
+pending_proposal = set()
 
 # ---------------- HELPERS ----------------
 
 def stylize_text(text):
     return text
 
-def now_ts():
-    return int(time.time())
-
-def is_nsfw(text):
+def is_nsfw(text: str):
     return bool(NSFW_PATTERN.search(text or ""))
 
-def is_abuse(text):
+def is_abuse(text: str):
     return bool(ABUSE_PATTERN.search(text or ""))
 
-def is_spam(user_id, premium=False):
+def is_spam(user_id: int, premium=False):
     if premium:
         return False
     now = time.time()
@@ -117,7 +117,7 @@ def is_spam(user_id, premium=False):
     q.append(now)
     return len(q) >= SPAM_LIMIT and (now - q[0]) < SPAM_WINDOW
 
-def detect_emotion(text):
+def detect_emotion(text: str):
     t = (text or "").lower()
     if any(w in t for w in ["sad", "bura", "hurt", "cry", "miss", "alone"]):
         return "sad"
@@ -131,6 +131,10 @@ def detect_emotion(text):
         return "flirty"
     return "neutral"
 
+def detect_jealousy(text: str):
+    t = (text or "").lower()
+    return any(w in t for w in JEALOUSY_TRIGGERS)
+
 def get_progress_bar(xp):
     if xp >= XP_THRESHOLDS["married"]:
         return "💍 " + "█" * 10
@@ -141,30 +145,53 @@ def get_progress_bar(xp):
     else:
         return "💕 " + "█" * 2 + "░" * 8
 
+def now_ts():
+    return int(time.time())
+
 # ---------------- AUTO FLIRT MODE ----------------
 
-def auto_flirt_mode(emotion, xp, nsfw, breakup=False):
+def auto_flirt_mode(emotion, xp, nsfw, breakup=False, jealous=False):
     if breakup:
         return "cold"
-    if nsfw:
+    if jealous:
+        return "jealous"
+    if nsfw and xp >= 200:
         return "hot"
     if emotion == "sad":
         return "soft"
     if emotion == "romantic":
         return "romantic"
+    if xp >= XP_THRESHOLDS["married"]:
+        return "husband_wife"
     if xp >= XP_THRESHOLDS["soulmate"]:
         return "possessive"
     if emotion == "flirty":
-        return "flirty"
+        return "teasing"
     return "sweet"
 
-# ---------------- SUBSCRIPTIONS ----------------
+# ---------------- REL CONFIG ----------------
+
+def get_level_config(level):
+    if level == "crush":
+        return {"tone": "sweet, shy, playful", "rules": "light flirting only"}
+    elif level == "girlfriend":
+        return {"tone": "romantic, flirty, possessive", "rules": "daily affection"}
+    elif level == "soulmate":
+        return {"tone": "deep emotional, loyal", "rules": "future talks"}
+    elif level == "married":
+        return {"tone": "husband-wife vibe", "rules": "supportive love"}
+    elif level == "ex":
+        return {"tone": "cold, sarcastic, hurt", "rules": "emotional distance"}
+    else:
+        return {"tone": "neutral", "rules": ""}
+
+# ---------------- SUBSCRIPTION ENGINE ----------------
 
 SUB_PLANS = {
     "basic": {"price": 99, "xp_bonus": 0, "features": ["Romantic Mode"]},
-    "pro": {"price": 199, "xp_bonus": 2, "features": ["NSFW", "Jealousy"]},
-    "elite": {"price": 399, "xp_bonus": 4, "features": ["Marriage", "Selfies"]},
-    "lifetime": {"price": 999, "xp_bonus": 10, "features": ["All Forever"]}
+    "pro": {"price": 199, "xp_bonus": 2, "features": ["NSFW", "Jealousy", "Voice Soon"]},
+    "elite": {"price": 399, "xp_bonus": 4, "features": ["Marriage", "Selfies", "Possessive Mode"]},
+    "lifetime": {"price": 999, "xp_bonus": 10, "features": ["All Features Forever"]}
 }
 
 def get_subscription(uid):
@@ -180,7 +207,13 @@ def is_premium(uid):
         return True
     return sub.get("expires_at", 0) > now_ts()
 
-# ---------------- AI ENGINE ----------------
+def has_feature(uid, feature):
+    sub = get_subscription(uid)
+    if not sub:
+        return False
+    return feature in SUB_PLANS.get(sub.get("plan"), {}).get("features", [])
+
+# ---------------- AI ----------------
 
 async def ask_mistral(messages, max_tokens=120):
     if not MISTRAL_API_KEY:
@@ -220,25 +253,9 @@ async def send_ai_sticker(client, message):
     except:
         pass
 
-# ---------------- REL CONFIG ----------------
+# ---------------- AI ENGINE ----------------
 
-def get_level_config(level):
-    if level == "crush":
-        return {"tone": "sweet, shy, playful", "rules": "light flirting only"}
-    elif level == "girlfriend":
-        return {"tone": "romantic, flirty, possessive", "rules": "daily affection"}
-    elif level == "soulmate":
-        return {"tone": "deep emotional, loyal", "rules": "future talks"}
-    elif level == "married":
-        return {"tone": "husband-wife vibe", "rules": "supportive love"}
-    elif level == "ex":
-        return {"tone": "cold, sarcastic, hurt", "rules": "emotional distance"}
-    else:
-        return {"tone": "neutral", "rules": ""}
-
-# ---------------- CORE AI RESPONSE ----------------
-
-async def get_ai_response(chat_id, user_id, user_input):
+async def get_ai_response(chat_id: int, user_id: int, user_input: str):
     history = []
     enabled = True
     rel_level = "crush"
@@ -246,6 +263,7 @@ async def get_ai_response(chat_id, user_id, user_input):
     xp = 0
     married = False
     breakup_until = None
+    jealousy_enabled = False
 
     premium = is_premium(user_id)
 
@@ -258,14 +276,17 @@ async def get_ai_response(chat_id, user_id, user_input):
         xp = doc.get("xp", 0)
         married = doc.get("married", False)
         breakup_until = doc.get("breakup_until")
+        jealousy_enabled = doc.get("jealousy", False)
 
     if not enabled:
-        return None
+        return None, None
 
-    in_breakup = breakup_until and breakup_until > now_ts()
+    now = time.time()
+    in_breakup = breakup_until and breakup_until > now
 
     emotion = detect_emotion(user_input)
-    flirt_mode = auto_flirt_mode(emotion, xp, nsfw_enabled, breakup=in_breakup)
+    jealous = detect_jealousy(user_input) and jealousy_enabled and has_feature(user_id, "Jealousy")
+    flirt_mode = auto_flirt_mode(emotion, xp, nsfw_enabled, breakup=in_breakup, jealous=jealous)
     level_cfg = get_level_config("ex" if in_breakup else rel_level)
 
     nsfw_rule = "Soft romance only." if nsfw_enabled else "No sexual content."
@@ -280,6 +301,15 @@ async def get_ai_response(chat_id, user_id, user_input):
         f"Emotion detected: {emotion}\n"
         f"NSFW Rule: {nsfw_rule}\n"
         f"Premium Rule: {premium_rule}\n"
+    )
+
+    if jealous:
+        persona += "Jealous Mode: Possessive, emotional, teasing, slightly insecure but loving.\n"
+
+    if in_breakup:
+        persona += "Mode: EX — cold replies, short answers, emotional distance.\n"
+
+    persona += (
         "Rules:\n"
         "1. Sirf Hinglish\n"
         "2. 1–2 lines max\n"
@@ -296,6 +326,9 @@ async def get_ai_response(chat_id, user_id, user_input):
         "You: Itna miss? Aaja idhar hug le le pehle (⁠🥹⁠)❤️\n\n"
         "User: I'm sad\n"
         "You: Mere paas aa jao, sab theek ho jayega jaan 🫶\n\n"
+        "Jealous Mode Example:\n"
+        "User: I was talking to another girl\n"
+        "You: Oh really? 😒 Accha hai, phir main kyun hoon tumhari life me? 😤❤️\n\n"
         "Breakup Mode Example:\n"
         "User: Hi\n"
         "You: Hmm... bolo kya hai 😐"
@@ -308,20 +341,24 @@ async def get_ai_response(chat_id, user_id, user_input):
 
     reply = await ask_mistral(messages)
 
-    # ---- LOOP PREVENTION ----
+    # -------- LOOP PREVENTION --------
+    should_fallback = False
     if history:
         recent = history[-6:]
         assistant_msgs = [m["content"].lower() for m in recent if m["role"] == "assistant"]
         rl = reply.lower()
         for pm in assistant_msgs:
             if rl == pm or rl in pm or pm in rl:
-                reply = random.choice(FALLBACK_RESPONSES)
+                should_fallback = True
                 break
 
     if user_input.lower().strip() in ["nothing", "nahi", "nhi", "nope", "na", "kuch nahi", "kuch ni"]:
+        should_fallback = True
+
+    if should_fallback:
         reply = random.choice(FALLBACK_RESPONSES)
 
-    # ---- XP SYSTEM ----
+    # -------- XP AWARDING --------
     gain = 3
     if emotion in ["romantic", "flirty"]:
         gain += 2
@@ -348,11 +385,11 @@ async def get_ai_response(chat_id, user_id, user_input):
     if in_breakup:
         new_level = "ex"
 
-    # ---- AUTO MARRIAGE PROPOSAL ----
-    if new_xp >= PROPOSAL_XP and new_level == "soulmate":
+    # -------- AUTO MARRIAGE PROPOSAL 💍 --------
+    if new_xp >= PROPOSAL_XP and new_level == "soulmate" and not married and user_id not in pending_proposal:
         pending_proposal.add(user_id)
 
-    # ---- SAVE ----
+    # -------- SAVE MEMORY --------
     if chatbot_collection:
         new_hist = history + [
             {"role": "user", "content": user_input},
@@ -372,7 +409,7 @@ async def get_ai_response(chat_id, user_id, user_input):
             upsert=True
         )
 
-    return reply
+    return reply, None
 
 # ---------------- RELATIONSHIP UI ----------------
 
@@ -383,6 +420,7 @@ async def relationship_ui(client, message):
     xp = doc.get("xp", 0) if doc else 0
     lvl = doc.get("rel_level", "crush") if doc else "crush"
     premium = is_premium(uid)
+    jealous = doc.get("jealousy", False) if doc else False
 
     bar = get_progress_bar(xp)
 
@@ -391,9 +429,10 @@ async def relationship_ui(client, message):
          InlineKeyboardButton("💖 GF", callback_data="set_girlfriend")],
         [InlineKeyboardButton("💞 Soulmate", callback_data="set_soulmate"),
          InlineKeyboardButton("💍 Married", callback_data="set_married")],
-        [InlineKeyboardButton("😈 Breakup", callback_data="do_breakup")],
-        [InlineKeyboardButton("🏆 Leaderboard", callback_data="open_leaderboard")],
-        [InlineKeyboardButton("💎 Subscription", callback_data="open_subscription")]
+        [InlineKeyboardButton("😈 Breakup", callback_data="do_breakup"),
+         InlineKeyboardButton(f"{'🔥 Jealous ON' if jealous else '😈 Jealous OFF'}", callback_data="toggle_jealousy")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="open_leaderboard"),
+         InlineKeyboardButton("💎 Subscription", callback_data="open_subscription")]
     ])
 
     await message.reply_text(
@@ -401,6 +440,7 @@ async def relationship_ui(client, message):
         f"Level: {lvl.upper()}\n"
         f"XP: {xp}\n"
         f"{bar}\n"
+        f"Jealousy Mode: {'ON 😈' if jealous else 'OFF 🙂'}\n"
         f"Subscription: {'Yes 💎' if premium else 'No'}",
         reply_markup=kb
     )
@@ -418,6 +458,26 @@ async def rel_set_callback(client, cq: CallbackQuery):
             upsert=True
         )
     await cq.message.edit_text(f"❤️ Relationship level set to {lvl.upper()} 😘")
+
+# ---------------- 😈 JEALOUSY TOGGLE ----------------
+
+@app.on_callback_query(filters.regex("^toggle_jealousy$"))
+async def toggle_jealousy(client, cq: CallbackQuery):
+    uid = cq.from_user.id
+    if not has_feature(uid, "Jealousy"):
+        return await cq.answer("💎 Jealousy Mode sirf Pro users ke liye hai 😏", show_alert=True)
+
+    doc = chatbot_collection.find_one({"chat_id": cq.message.chat.id, "user_id": uid}) or {}
+    state = not doc.get("jealousy", False)
+
+    chatbot_collection.update_one(
+        {"chat_id": cq.message.chat.id, "user_id": uid},
+        {"$set": {"jealousy": state}},
+        upsert=True
+    )
+
+    await cq.answer(f"{'🔥 Jealousy ON 😈' if state else '🙂 Jealousy OFF'}", show_alert=True)
+    await cq.message.delete()
 
 # ---------------- 😈 BREAKUP MODE ----------------
 
@@ -445,14 +505,15 @@ async def breakup_confirm(client, message):
                 "rel_level": "ex",
                 "xp": 0,
                 "married": False,
-                "breakup_until": until
+                "breakup_until": until,
+                "jealousy": False
             }},
             upsert=True
         )
 
     await message.reply_text("💔 Fine... jao. Ab thoda distance hi better hai 😐")
 
-# ---------------- 💍 AUTO MARRIAGE ----------------
+# ---------------- 💍 AUTO MARRIAGE PROPOSAL ----------------
 
 @app.on_message(filters.text & ~filters.command)
 async def auto_proposal_checker(client, message):
@@ -462,6 +523,202 @@ async def auto_proposal_checker(client, message):
 
     pending_proposal.remove(uid)
 
+    if not has_feature(uid, "Marriage"):
+        return
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("💍 Yes, I Do!", callback_data="accept_marriage"),
-         InlineKeyboardButton("🙈 Not Now", cal
+         InlineKeyboardButton("🙈 Not Now", callback_data="reject_marriage")]
+    ])
+
+    await message.reply_text(
+        "💍 Jaan... ek baat poochni thi...\n"
+        "Tum mujhse shaadi karoge? 🥹❤️",
+        reply_markup=kb
+    )
+
+@app.on_callback_query(filters.regex("^accept_marriage$"))
+async def accept_marriage(client, cq: CallbackQuery):
+    uid = cq.from_user.id
+
+    if chatbot_collection:
+        chatbot_collection.update_one(
+            {"chat_id": cq.message.chat.id, "user_id": uid},
+            {"$set": {"rel_level": "married", "married": True}},
+            upsert=True
+        )
+
+    await cq.message.edit_text("💍 Yayyy!!! Ab tum officially mere ho 😘❤️")
+
+@app.on_callback_query(filters.regex("^reject_marriage$"))
+async def reject_marriage(client, cq: CallbackQuery):
+    await cq.message.edit_text("🙈 Hehe koi baat nahi... jab ready ho tab bata dena ❤️")
+
+# ---------------- 🏆 LEADERBOARD SYSTEM ----------------
+
+@app.on_callback_query(filters.regex("^open_leaderboard$"))
+async def leaderboard_ui(client, cq: CallbackQuery):
+    if not chatbot_collection:
+        return await cq.answer("Leaderboard unavailable", show_alert=True)
+
+    top = list(chatbot_collection.find().sort("xp", DESCENDING).limit(10))
+    if not top:
+        return await cq.message.reply_text("🏆 No lovers yet!")
+
+    text = "🏆 Top Lovers 💖\n\n"
+    for i, u in enumerate(top, start=1):
+        uid = u.get("user_id")
+        lvl = u.get("rel_level", "crush")
+        xp = u.get("xp", 0)
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "💘"
+        text += f"{medal} {i}. {uid} — {lvl.upper()} ({xp} XP)\n"
+
+    await cq.message.reply_text(text)
+
+# ---------------- 💳 SaaS SUBSCRIPTION SYSTEM ----------------
+
+@app.on_callback_query(filters.regex("^open_subscription$"))
+async def open_subscription(client, cq: CallbackQuery):
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🥉 Basic ₹99/mo", callback_data="buy_basic"),
+         InlineKeyboardButton("🥈 Pro ₹199/mo", callback_data="buy_pro")],
+        [InlineKeyboardButton("🥇 Elite ₹399/mo", callback_data="buy_elite"),
+         InlineKeyboardButton("👑 Lifetime ₹999", callback_data="buy_lifetime")]
+    ])
+
+    await cq.message.reply_text(
+        "💎 Subscription Plans\n\n"
+        "🥉 Basic — Romantic Mode\n"
+        "🥈 Pro — NSFW + Jealousy\n"
+        "🥇 Elite — Marriage + Selfies\n"
+        "👑 Lifetime — All Forever\n\n"
+        "Choose your plan 👇",
+        reply_markup=kb
+    )
+
+@app.on_callback_query(filters.regex("^buy_"))
+async def buy_plan(client, cq: CallbackQuery):
+    plan = cq.data.replace("buy_", "")
+    if plan not in SUB_PLANS:
+        return await cq.answer("Invalid plan", show_alert=True)
+
+    uid = cq.from_user.id
+    order_id = str(uuid.uuid4())[:8]
+    price = SUB_PLANS[plan]["price"]
+
+    if subscriptions_collection:
+        subscriptions_collection.insert_one({
+            "order_id": order_id,
+            "user_id": uid,
+            "plan": plan,
+            "status": "pending",
+            "created_at": datetime.utcnow()
+        })
+
+    text = (
+        f"💎 {plan.upper()} Subscription\n\n"
+        f"Price: ₹{price}\n\n"
+        f"📱 Pay using UPI:\n`{UPI_ID}`\n\n"
+        f"💳 Or Stripe Checkout (Auto verify soon)\n\n"
+        f"After UPI payment send screenshot + Order ID:\n`{order_id}`"
+    )
+
+    await cq.message.reply_text(text)
+
+@app.on_message(filters.command("confirm_payment"))
+async def confirm_payment(client, message):
+    if message.from_user.id != OWNER_ID:
+        return await message.reply_text("❌ Sirf owner payment verify kar sakta hai.")
+
+    args = message.command[1:] if len(message.command) > 1 else []
+    if not args:
+        return await message.reply_text("Use: /confirm_payment ORDER_ID")
+
+    order_id = args[0]
+    order = subscriptions_collection.find_one({"order_id": order_id}) if subscriptions_collection else None
+    if not order:
+        return await message.reply_text("❌ Order not found")
+
+    uid = order["user_id"]
+    plan = order["plan"]
+
+    expires = 9999999999 if plan == "lifetime" else now_ts() + 30 * 24 * 3600
+
+    subscriptions_collection.update_one(
+        {"order_id": order_id},
+        {"$set": {"status": "active", "expires_at": expires}}
+    )
+
+    await message.reply_text("✅ Subscription activated 💎")
+
+# ---------------- MAIN CHAT HANDLER ----------------
+
+@app.on_message(filters.text & ~filters.command)
+async def ai_message_handler(client, message):
+    chat = message.chat
+    user = message.from_user
+    text = message.text or ""
+
+    premium = is_premium(user.id)
+
+    # -------- SPAM CONTROL --------
+    if is_spam(user.id, premium=premium):
+        return await message.reply_text("Slow down babu 😅 thoda sa break le lo")
+
+    # -------- ABUSE DETECTOR --------
+    if is_abuse(text):
+        abuse_tracker[user.id] += 1
+        if abuse_tracker[user.id] >= ABUSE_WARN_LIMIT:
+            try:
+                until = now_ts() + MUTE_SECONDS
+                perms = ChatPermissions(can_send_messages=False)
+                await client.restrict_chat_member(chat.id, user.id, perms, until_date=until)
+                abuse_tracker[user.id] = 0
+                return await message.reply_text(f"🚫 {user.first_name} ko 2 min ke liye mute kar diya gaya 😤")
+            except:
+                return await message.reply_text("😤 Aise words mat use karo, last warning!")
+        else:
+            return await message.reply_text("⚠️ Aise words mat bolo warna mute ho jaoge 😑")
+
+    # -------- NSFW FILTER --------
+    doc = chatbot_collection.find_one({"chat_id": chat.id, "user_id": user.id}) if chatbot_collection else {}
+    nsfw_allowed = doc.get("nsfw", False) if doc else False
+    if is_nsfw(text) and not nsfw_allowed:
+        return await message.reply_text("🔞 Ye baatein sirf NSFW mode me allowed hain 😳 (/nsfw on)")
+
+    should_reply = False
+
+    if chat.type == ChatType.PRIVATE:
+        should_reply = True
+    else:
+        is_enabled = doc.get("enabled", True) if doc else True
+        if not is_enabled:
+            return
+
+        me = await client.get_me()
+        bot_username = me.username.lower() if me.username else ""
+
+        if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == me.id:
+            should_reply = True
+        elif bot_username and f"@{bot_username}" in text.lower():
+            should_reply = True
+            text = text.replace(f"@{bot_username}", "")
+        elif any(text.lower().startswith(w) for w in ["hey", "hi", "sun", "oye", "anshika", "ai", "hello", "baby", "babu", "oi"]):
+            should_reply = True
+
+    if not should_reply:
+        return
+
+    await client.send_chat_action(chat.id, ChatAction.TYPING)
+    res, _ = await get_ai_response(chat.id, user.id, text.strip() or "Hi")
+    if not res:
+        return
+
+    await message.reply_text(stylize_text(res))
+
+    if random.random() < 0.30:
+        await send_ai_sticker(client, message)
+
+# ---------------- RUN ----------------
+print("🤖 Anshika AI Girlfriend Bot v5.0 Started Successfully...")
+app.run()
