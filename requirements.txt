@@ -1,7 +1,10 @@
 flask
 pyrogram==2.0.106
+tgcrypto
 pymongo
 httpx
+razorpay
+stripe
 motor
 requests
 dnspython
