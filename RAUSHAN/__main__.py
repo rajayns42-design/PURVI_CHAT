@@ -1,24 +1,51 @@
-from flask import Flask
-import threading
-from RAUSHAN import LOGGER, AMBOT
+from pyrogram import Client, filters
+from config import *
+from database import users
+from relationship_engine import add_xp, decay_relationship
+from jealousy_engine import check_jealousy, jealousy_reply
+from breakup_engine import trigger_breakup, breakup_reply
+from payment_engine import create_stripe_session
+from ui import main_menu
+from ai_engine import build_prompt
+import httpx
 
-app = Flask(__name__)
+app = Client("gfbot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-@app.route("/")
-def home():
-    return "Bot is running"
+@app.on_message(filters.private & filters.text)
+async def chat_handler(client, message):
+    uid = message.from_user.id
+    user = users.find_one({"_id": uid}) or {
+        "_id": uid,
+        "xp": 0,
+        "level": "stranger",
+        "status": "normal",
+        "locked_romance": False,
+        "premium": False,
+        "bot_name": BOT_NAME
+    }
 
-def run_flask():
-    app.run(host="0.0.0.0", port=8000)
+    user = decay_relationship(user)
 
-def run_bot():
-    LOGGER.info("The PURVI CHAT BOT Started.")
-    AMBOT().run()
+    if user.get("status") == "broken":
+        await message.reply(breakup_reply())
+        return
 
-if __name__ == "__main__":
-    # Create a thread for Flask server
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.start()
+    if check_jealousy(message.text):
+        await message.reply(jealousy_reply(message.from_user.first_name))
+        return
 
-    # Run the bot in the main thread
-    run_bot()
+    user = add_xp(user, 20)
+    users.update_one({"_id": uid}, {"$set": user}, upsert=True)
+
+    prompt = build_prompt(user, message.text, "romantic")
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {MISTRAL_API_KEY}"},
+            json={"model": "mistral-large-latest", "messages": [{"role": "user", "content": prompt}]}
+        )
+        reply = r.json()["choices"][0]["message"]["content"]
+
+    await message.reply(reply, reply_markup=main_menu())
+
+app.run()
