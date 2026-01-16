@@ -1,10 +1,8 @@
 import os
 import random
-import httpx
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
 from Anshika.config import MISTRAL_API_KEY, BOT_NAME, OWNER_LINK
 from Anshika.database import chatbot_collection
 from Anshika.utils import stylize_text
