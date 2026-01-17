@@ -1,5 +1,5 @@
 # =========================
-# 💖 ANSHIKA AI GIRLFRIEND BOT v9.0 — ULTIMATE RELATIONSHIP ENGINE
+# 💖 ANSHIKA AI GIRLFRIEND BOT v6.0 — FULL SYSTEM
 # =========================
 
 import os
@@ -7,117 +7,104 @@ import random
 import time
 import re
 import httpx
-import asyncio
+import uuid
+import traceback
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
-
+from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType, ChatAction
-from pyrogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-    ChatPermissions,
-)
-
-from pymongo import MongoClient, errors
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ChatPermissions
+from pymongo import MongoClient, DESCENDING
 
 # ---------------- ENV ----------------
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 BOT_NAME = os.getenv("BOT_NAME", "Anshika")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-OWNER_LINK = os.getenv("OWNER_LINK", "")
 MONGO_URL = os.getenv("MONGO_URL")
+LOGGER_GROUP = int(os.getenv("LOGGER_GROUP", "0"))
+UPI_ID = os.getenv("UPI_ID")
 
 # ---------------- CLIENT ----------------
-app = Client("anshika_ai_bot")
+app = Client("ai_chatbot")
 
 # ---------------- DB ----------------
-mongo = None
-db = None
-users_col = None
-gfs_col = None
-subs_col = None
-couples_col = None
-analytics_col = None
-leaderboard_col = None
-shop_col = None
-marriage_col = None
+chatbot_collection = None
+subscriptions_collection = None
+rooms_collection = None
 
 if MONGO_URL:
     try:
         mongo = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
         mongo.server_info()
         db = mongo["chatbot"]
+        chatbot_collection = db["chats"]
+        subscriptions_collection = db["subscriptions"]
+        rooms_collection = db["rooms"]
 
-        users_col = db["users"]
-        gfs_col = db["girlfriends"]
-        subs_col = db["subscriptions"]
-        couples_col = db["couples"]
-        analytics_col = db["analytics"]
-        leaderboard_col = db["leaderboard"]
-        shop_col = db["shop"]
-        marriage_col = db["marriages"]
-
-        users_col.create_index([("user_id", 1)], unique=True)
-        gfs_col.create_index([("user_id", 1), ("gf_id", 1)], unique=True)
-        subs_col.create_index([("user_id", 1)], unique=True)
-        couples_col.create_index([("chat_id", 1), ("user1", 1), ("user2", 1)], unique=True)
-        analytics_col.create_index([("date", 1)], unique=True)
-        leaderboard_col.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
-        marriage_col.create_index([("chat_id", 1), ("u1", 1), ("u2", 1)], unique=True)
+        chatbot_collection.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
+        chatbot_collection.create_index([("xp", -1)])
+        subscriptions_collection.create_index([("user_id", 1)], unique=True)
+        rooms_collection.create_index([("room_code", 1)], unique=True)
 
         print("✅ MongoDB connected")
     except Exception as e:
-        print("❌ MongoDB disabled:", e)
-        mongo = None
+        print("❌ MongoDB failed:", e)
+        chatbot_collection = None
 
 # ---------------- CONFIG ----------------
 MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions"
 MODEL = "mistral-small-latest"
-
-MAX_HISTORY = 16
-SPAM_LIMIT = 7
-SPAM_WINDOW = 12
-MUTE_SECONDS = 120
+MAX_HISTORY = 10
+SPAM_LIMIT = 6
+SPAM_WINDOW = 10
 ABUSE_WARN_LIMIT = 2
+MUTE_SECONDS = 120
+BREAKUP_COOLDOWN = 3600
+PROPOSAL_XP = 650
 
-# ---------------- PATTERNS ----------------
-NSFW_PATTERN = re.compile(
-    r"\b(sex|nude|boobs|dick|pussy|lund|chut|fuck|fap|horny|porn|sax|kiss me|bed pe)\b",
-    re.I,
-)
-ABUSE_PATTERN = re.compile(
-    r"\b(madarchod|bhenchod|mc|bc|chutiya|harami|saala|gandu|fuck you|bitch)\b",
-    re.I,
-)
+# ---------------- DATA ----------------
+FALLBACK_RESPONSES = [
+    "Hmm... achha 😌",
+    "Okk jaan ❤️",
+    "Samajh gayi 🥹",
+    "Haan bolo 😘",
+    "Interesting 👀",
+    "Sun rahi hoon 💖"
+]
+
+NSFW_PATTERN = re.compile(r"\b(sex|nude|boobs|dick|pussy|lund|chut|fuck|fap|horny|porn|kiss me|bed pe|sax)\b", re.I)
+ABUSE_PATTERN = re.compile(r"\b(madarchod|bhenchod|bc|mc|chutiya|harami|saala|kutte|gandu|fuck you|idiot|bitch)\b", re.I)
+
+REL_LEVELS = ["crush", "girlfriend", "soulmate", "married", "ex"]
+XP_THRESHOLDS = {
+    "crush": 0,
+    "girlfriend": 120,
+    "soulmate": 350,
+    "married": 700
+}
 
 # ---------------- MEMORY ----------------
 spam_tracker = defaultdict(lambda: deque(maxlen=SPAM_LIMIT))
 abuse_tracker = defaultdict(int)
-active_gf = defaultdict(lambda: 1)
-pending_couple_requests = {}
-pending_marriage_requests = {}
-game_rooms = {}
+pending_breakup = set()
+pending_proposal = set()
+
+# ---------------- LOGGER ----------------
+
+async def log_event(text):
+    try:
+        if LOGGER_GROUP:
+            await app.send_message(LOGGER_GROUP, f"📜 {text}")
+    except:
+        pass
 
 # ---------------- HELPERS ----------------
 
 def now_ts():
     return int(time.time())
 
-def safe_db(op, *args, **kwargs):
-    try:
-        if op:
-            return op(*args, **kwargs)
-    except Exception as e:
-        print("❌ DB Error:", e)
-    return None
-
-def is_spam(user_id):
-    q = spam_tracker[user_id]
-    now = time.time()
-    q.append(now)
-    return len(q) >= SPAM_LIMIT and (now - q[0]) < SPAM_WINDOW
+def stylize_text(text):
+    return text
 
 def is_nsfw(text):
     return bool(NSFW_PATTERN.search(text or ""))
@@ -125,91 +112,60 @@ def is_nsfw(text):
 def is_abuse(text):
     return bool(ABUSE_PATTERN.search(text or ""))
 
-def track_event(evt):
-    if not analytics_col:
-        return
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    safe_db(
-        analytics_col.update_one,
-        {"date": today},
-        {"$inc": {evt: 1}},
-        upsert=True,
-    )
+def is_spam(user_id):
+    now = time.time()
+    q = spam_tracker[user_id]
+    q.append(now)
+    return len(q) >= SPAM_LIMIT and (now - q[0]) < SPAM_WINDOW
 
-# ---------------- USER CORE ----------------
+def detect_emotion(text):
+    t = (text or "").lower()
+    if any(w in t for w in ["sad", "bura", "hurt", "cry", "miss", "alone"]):
+        return "sad"
+    if any(w in t for w in ["angry", "gussa", "pagal", "hate"]):
+        return "angry"
+    if any(w in t for w in ["love", "miss u", "jaan", "baby", "kiss"]):
+        return "romantic"
+    if any(w in t for w in ["haha", "lol", "fun", "maza"]):
+        return "playful"
+    if any(w in t for w in ["hot", "cute", "sexy"]):
+        return "flirty"
+    return "neutral"
 
-def ensure_user(uid):
-    if not users_col:
-        return {"user_id": uid, "xp": 0, "level": "crush", "relationship_state": "stable"}
-    u = safe_db(users_col.find_one, {"user_id": uid})
-    if not u:
-        u = {
-            "user_id": uid,
-            "xp": 0,
-            "level": "crush",
-            "relationship_state": "stable",  # stable | silent | fight | breakup | married
-            "trust": 100,
-            "created_at": datetime.utcnow(),
-            "last_love_letter": None,
-        }
-        safe_db(users_col.insert_one, u)
-    return u
+def detect_language(text):
+    t = text.lower()
+    if re.search(r"[अ-ह]", t):
+        return "hindi"
+    if any(w in t for w in ["tum", "jaan", "babu", "kya", "kyu", "kaise"]):
+        return "hinglish"
+    return "english"
 
-def update_user(uid, data):
-    if not users_col:
-        return
-    safe_db(users_col.update_one, {"user_id": uid}, {"$set": data}, upsert=True)
+def get_progress_bar(xp):
+    if xp >= XP_THRESHOLDS["married"]:
+        return "💍 " + "█" * 10
+    elif xp >= XP_THRESHOLDS["soulmate"]:
+        return "💞 " + "█" * 7 + "░" * 3
+    elif xp >= XP_THRESHOLDS["girlfriend"]:
+        return "💖 " + "█" * 4 + "░" * 6
+    else:
+        return "💕 " + "█" * 2 + "░" * 8
 
-def add_xp(uid, amount):
-    u = ensure_user(uid)
-    new_xp = max(0, u.get("xp", 0) + amount)
-    level = calc_level(new_xp)
-    update_user(uid, {"xp": new_xp, "level": level})
-    return new_xp, level
+# ---------------- AI ----------------
 
-def calc_level(xp):
-    if xp >= 5000:
-        return "wife"
-    if xp >= 2500:
-        return "soulmate"
-    if xp >= 1000:
-        return "girlfriend"
-    if xp >= 300:
-        return "crush"
-    return "stranger"
-
-# ---------------- SUBSCRIPTIONS ----------------
-
-def is_premium(uid):
-    if not subs_col:
-        return False
-    sub = safe_db(subs_col.find_one, {"user_id": uid, "status": "active"})
-    if not sub:
-        return False
-    if sub.get("plan") == "lifetime":
-        return True
-    return sub.get("expires_at", 0) > now_ts()
-
-# ---------------- AI CORE ----------------
-
-async def ask_mistral(messages):
+async def ask_mistral(messages, max_tokens=120):
     if not MISTRAL_API_KEY:
-        return random.choice(
-            ["Hmm jaan 😘", "Bolo na ❤️", "Sun rahi hoon 🥰", "Oye cute ho tum 😳❤️"]
-        )
+        return random.choice(FALLBACK_RESPONSES)
 
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
     }
 
     payload = {
         "model": MODEL,
         "messages": messages,
-        "temperature": 0.95,
-        "max_tokens": 120,
-        "presence_penalty": 0.4,
-        "frequency_penalty": 0.3,
+        "temperature": 0.9,
+        "max_tokens": max_tokens
     }
 
     try:
@@ -217,681 +173,637 @@ async def ask_mistral(messages):
             r = await client.post(MISTRAL_URL, headers=headers, json=payload)
             if r.status_code == 200:
                 data = r.json()
-                return (
-                    data.get("choices", [{}])[0]
-                    .get("message", {})
-                    .get("content", "")
-                    .strip()
-                )
+                return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip() or random.choice(FALLBACK_RESPONSES)
     except Exception as e:
-        print("❌ AI Error:", e)
+        await log_event(f"❌ Mistral Error: {e}")
 
-    return random.choice(
-        ["Hmm jaan 😘", "Bolo na ❤️", "Sun rahi hoon 🥰", "Oye cute ho tum 😳❤️"]
-    )
+    return random.choice(FALLBACK_RESPONSES)
 
-# ---------------- PERSONALITY ----------------
+# ---------------- REL CONFIG ----------------
 
-PERSONALITIES = {
-    "cute": "Sweet bubbly girlfriend vibe",
-    "romantic": "Deep emotional lover",
-    "savage": "Teasing bold naughty tone",
-    "possessive": "Clingy jealous girlfriend",
-    "wife": "Supportive mature wife vibes",
-    "friend": "Chill friendly supportive vibe",
+def get_level_config(level):
+    if level == "crush":
+        return {"tone": "sweet, shy, playful", "rules": "light flirting only"}
+    elif level == "girlfriend":
+        return {"tone": "romantic, flirty, possessive", "rules": "daily affection"}
+    elif level == "soulmate":
+        return {"tone": "deep emotional, loyal", "rules": "future talks"}
+    elif level == "married":
+        return {"tone": "husband-wife vibe", "rules": "supportive love"}
+    elif level == "ex":
+        return {"tone": "cold, sarcastic, hurt", "rules": "emotional distance"}
+    else:
+        return {"tone": "neutral", "rules": ""}
+
+# ---------------- SUBSCRIPTION ----------------
+
+SUB_PLANS = {
+    "basic": {"price": 99, "xp_bonus": 0},
+    "pro": {"price": 199, "xp_bonus": 2},
+    "elite": {"price": 399, "xp_bonus": 4},
+    "lifetime": {"price": 999, "xp_bonus": 10}
 }
 
-def detect_emotion(text):
-    t = (text or "").lower()
-    if any(w in t for w in ["sad", "hurt", "cry", "miss", "alone"]):
-        return "sad"
-    if any(w in t for w in ["angry", "gussa", "hate"]):
-        return "angry"
-    if any(w in t for w in ["love", "jaan", "baby", "kiss", "miss u"]):
-        return "romantic"
-    if any(w in t for w in ["lol", "haha", "fun"]):
-        return "playful"
-    if any(w in t for w in ["hot", "sexy", "cute"]):
-        return "flirty"
-    return "neutral"
-
-# ---------------- MULTI-GF CORE ----------------
-
-def ensure_default_gf(uid):
-    if not gfs_col:
-        return
-    gf = safe_db(gfs_col.find_one, {"user_id": uid, "gf_id": 1})
-    if not gf:
-        safe_db(
-            gfs_col.insert_one,
-            {
-                "user_id": uid,
-                "gf_id": 1,
-                "name": BOT_NAME,
-                "personality": "romantic",
-                "xp": 0,
-                "nsfw": False,
-                "created_at": datetime.utcnow(),
-                "history": [],
-            },
-        )
-
-def get_active_gf(uid):
-    gf_id = active_gf.get(uid, 1)
-    if gfs_col:
-        gf = safe_db(gfs_col.find_one, {"user_id": uid, "gf_id": gf_id})
-        if gf:
-            return gf
-    return {
-        "gf_id": 1,
-        "name": BOT_NAME,
-        "personality": "romantic",
-        "xp": 0,
-        "nsfw": False,
-        "history": [],
-    }
-
-# ---------------- DRAMA + BREAKUP ENGINE ----------------
-
-def trigger_random_drama():
-    return random.choice(["silent", "fight", "jealous", "normal"])
-
-DRAMA_LINES = {
-    "silent": [
-        "Hmm... mujhe thoda space chahiye 😔",
-        "Aaj mood thoda off hai...",
-        "Baad me baat karte hain 😒",
-    ],
-    "fight": [
-        "Tum hamesha same galti repeat karte ho 😡",
-        "Mujhe hurt hua hai...",
-        "Tum samajhte hi nahi ho 😤",
-    ],
-    "jealous": [
-        "Tum usse itna close kyun ho? 😠",
-        "Mujhe jealousy ho rahi hai...",
-        "Sach bolo... koi aur toh nahi? 😳",
-    ],
-}
-
-def breakup_penalty(xp):
-    return max(100, int(xp * 0.2))
-
-def makeup_bonus():
-    return random.randint(150, 300)
-
-# ---------------- GROUP COUPLE MODE ----------------
-
-def get_couple(chat_id, uid):
-    if not couples_col:
+def get_subscription(uid):
+    if not subscriptions_collection:
         return None
-    return safe_db(
-        couples_col.find_one,
-        {"chat_id": chat_id, "$or": [{"user1": uid}, {"user2": uid}]},
-    )
+    return subscriptions_collection.find_one({"user_id": uid})
 
-def set_couple(chat_id, u1, u2):
-    if not couples_col:
-        return
-    safe_db(
-        couples_col.update_one,
-        {"chat_id": chat_id, "user1": u1, "user2": u2},
-        {
-            "$set": {
-                "chat_id": chat_id,
-                "user1": u1,
-                "user2": u2,
-                "since": datetime.utcnow(),
-            }
-        },
-        upsert=True,
-    )
+def is_premium(uid):
+    sub = get_subscription(uid)
+    if not sub:
+        return False
+    if sub.get("plan") == "lifetime":
+        return True
+    return sub.get("expires_at", 0) > now_ts()
 
-def remove_couple(chat_id, uid):
-    if not couples_col:
-        return
-    safe_db(
-        couples_col.delete_one,
-        {"chat_id": chat_id, "$or": [{"user1": uid}, {"user2": uid}]},
-    )
+# ---------------- AI ENGINE ----------------
 
-# ---------------- XP SHOP ----------------
+async def get_ai_response(chat_id: int, user_id: int, user_input: str):
+    history = []
+    enabled = True
+    rel_level = "crush"
+    nsfw_enabled = False
+    xp = 0
+    married = False
+    breakup_until = None
+    jealous_mode = False
 
-SHOP_ITEMS = {
-    "rose": {"price": 100, "msg": "🌹 Tumne mujhe rose diya... aww 🥺❤️"},
-    "chocolate": {"price": 200, "msg": "🍫 Chocolate! Tum kitne sweet ho 😘"},
-    "ring": {"price": 500, "msg": "💍 Ring?! Tum serious ho gaye ho kya 😳❤️"},
-    "date": {"price": 300, "msg": "🍽️ Date night! Ready ho jao 😍"},
-}
+    premium = is_premium(user_id)
 
-# ---------------- DAILY LOVE LETTER ----------------
+    if chatbot_collection:
+        doc = chatbot_collection.find_one({"chat_id": chat_id, "user_id": user_id}) or {}
+        history = doc.get("history", [])
+        enabled = doc.get("enabled", True)
+        rel_level = doc.get("rel_level", "crush")
+        nsfw_enabled = doc.get("nsfw", False)
+        xp = doc.get("xp", 0)
+        married = doc.get("married", False)
+        breakup_until = doc.get("breakup_until")
+        jealous_mode = doc.get("jealous", False)
 
-LOVE_LETTERS = [
-    "Good morning jaan ☀️ Tumhari smile se hi mera din ban jaata hai 😘❤️",
-    "Pata hai? Tum mere favourite insaan ho 🥺💖",
-    "Chahe kuch bhi ho, main hamesha tumhare saath hoon 🤗❤️",
-    "Tumhari yaad aaye bina din complete hi nahi hota 😳💕",
-]
+    if not enabled:
+        return None, None
 
-# ---------------- COUPLE GAMES ----------------
+    now = time.time()
+    in_breakup = breakup_until and breakup_until > now
 
-TRUTHS = [
-    "Tum apne partner me sabse cute cheez kya lagti hai? 😘",
-    "First crush ka naam batao 😏",
-    "Tumhara secret talent kya hai? 😳",
-    "Partner ke saath sabse romantic moment konsa tha? ❤️",
-]
+    emotion = detect_emotion(user_input)
+    lang = detect_language(user_input)
+    level_cfg = get_level_config("ex" if in_breakup else rel_level)
 
-DARES = [
-    "Apne partner ko tag karke bolo 'Tum mere ho 😘❤️'",
-    "Group me heart emoji spam karo 💖💖💖",
-    "Partner ko ek cheesy line bolo 😏",
-    "Next message me sirf emojis bhejo 😘🔥❤️",
-]
+    lang_rule = {
+        "hindi": "Reply in pure Hindi.",
+        "hinglish": "Reply in Hinglish.",
+        "english": "Reply in English."
+    }.get(lang, "Reply in Hinglish.")
 
-QUIZZES = [
-    ("Partner ka favourite colour kya hai?", ["Red", "Blue", "Black", "Pink"]),
-    ("Partner ko kaunsa food sabse zyada pasand hai?", ["Pizza", "Biryani", "Burger", "Momoj"]),
-    ("Partner ka dream place?", ["Paris", "Maldives", "Goa", "Shimla"]),
-]
-
-MULTI_GAMES = ["kiss_duel", "love_battle", "quiz_war"]
-
-# ---------------- AI RESPONSE ENGINE ----------------
-
-async def get_ai_response(uid, chat_id, user_text):
-    ensure_user(uid)
-    ensure_default_gf(uid)
-    gf = get_active_gf(uid)
-    user = ensure_user(uid)
-
-    emotion = detect_emotion(user_text)
-    premium = is_premium(uid)
-
-    # NSFW auto filter
-    if is_nsfw(user_text) and not gf.get("nsfw"):
-        return "🔞 Aisi baatein tabhi allowed hain jab tum /nsfw on karo 😳", None
-
-    personality = PERSONALITIES.get(gf["personality"], PERSONALITIES["romantic"])
-    level = user.get("level", "crush")
-    rel_state = user.get("relationship_state", "stable")
-
-    couple = get_couple(chat_id, uid)
-    couple_context = ""
-    if couple:
-        couple_context = "User is chatting in a group with their romantic partner."
-
-    # Auto drama trigger (low probability)
-    if rel_state == "stable" and random.random() < 0.04:
-        drama = trigger_random_drama()
-        if drama != "normal":
-            update_user(uid, {"relationship_state": drama})
-            return random.choice(DRAMA_LINES[drama]), gf
-
-    tone = "romantic and flirty"
-    if rel_state == "silent":
-        tone = "short, cold, distant"
-    elif rel_state == "fight":
-        tone = "angry but emotional"
-    elif rel_state == "breakup":
-        tone = "sad, cold, distant, hurt"
-    elif rel_state == "married":
-        tone = "deep loving wife vibes"
-
-    system_prompt = (
-        f"Tum ek Indian AI girlfriend ho.\n"
-        f"Name: {gf['name']}\n"
-        f"Personality: {personality}\n"
-        f"Relationship level: {level}\n"
-        f"Relationship state: {rel_state}\n"
-        f"Tone: {tone}\n"
-        f"User emotion: {emotion}\n"
-        f"Mode: {'Unlimited flirty premium girlfriend' if premium else 'Romantic girlfriend'}\n"
-        f"{couple_context}\n\n"
+    persona = (
+        f"You are {BOT_NAME}, an Indian AI girlfriend.\n"
+        f"Relationship Level: {('EX (Breakup)' if in_breakup else rel_level.upper())}\n"
+        f"Tone: {level_cfg['tone']}\n"
+        f"Rules: {level_cfg['rules']}\n"
+        f"Emotion detected: {emotion}\n"
+        f"{lang_rule}\n"
         "Rules:\n"
-        "1. Hinglish only\n"
-        "2. Always emotional and human\n"
-        "3. Max 2 lines\n"
-        "4. Use emojis 😘🥰❤️😳🔥\n"
-        "5. Act like real Indian girlfriend\n"
+        "1. Max 2 lines\n"
+        "2. Cute emojis\n"
+        "3. Natural girlfriend vibe\n"
+    )
+
+    system_prompt = persona + (
+        "\nExamples:\n"
+        "User: Hi\n"
+        "You: Hey jaan ❤️ kaise ho?\n\n"
+        "User: Miss you\n"
+        "You: Itna miss? Aaja idhar hug le lo 🥹❤️\n\n"
+        "User: I'm sad\n"
+        "You: Mere paas aa jao, sab theek ho jayega 🫶\n\n"
+        "Jealous Mode:\n"
+        "User: I talked to another girl\n"
+        "You: Oh really? 😒 Phir main kya hoon tumhari life mein? 💔\n\n"
+        "Breakup Mode:\n"
+        "User: Hi\n"
+        "You: Hmm... bolo kya chahiye 😐"
     )
 
     messages = [{"role": "system", "content": system_prompt}]
-    for h in gf.get("history", [])[-MAX_HISTORY:]:
-        messages.append({"role": h["role"], "content": h["content"]})
-    messages.append({"role": "user", "content": user_text})
+    for m in history[-MAX_HISTORY:]:
+        messages.append({"role": m["role"], "content": m["content"]})
+    messages.append({"role": "user", "content": user_input})
 
     reply = await ask_mistral(messages)
 
-    # XP system
-    gain = 6 if premium else 4
+    # -------- LOOP PREVENTION --------
+    if history:
+        recent = history[-6:]
+        assistant_msgs = [m["content"].lower() for m in recent if m["role"] == "assistant"]
+        rl = reply.lower()
+        for pm in assistant_msgs:
+            if rl == pm or rl in pm or pm in rl:
+                reply = random.choice(FALLBACK_RESPONSES)
+                break
+
+    if user_input.lower().strip() in ["nothing", "nahi", "nhi", "nope", "na", "kuch nahi", "kuch ni"]:
+        reply = random.choice(FALLBACK_RESPONSES)
+
+    # -------- XP AWARDING --------
+    gain = 3
     if emotion in ["romantic", "flirty"]:
         gain += 2
+    if any(w in user_input.lower() for w in ["miss", "love", "jaan", "baby"]):
+        gain += 2
 
-    add_xp(uid, gain)
+    sub = get_subscription(user_id)
+    if sub:
+        gain += SUB_PLANS.get(sub.get("plan"), {}).get("xp_bonus", 0)
 
-    if gfs_col:
-        new_hist = gf.get("history", []) + [
-            {"role": "user", "content": user_text},
-            {"role": "assistant", "content": reply},
+    if in_breakup:
+        gain = 0
+
+    new_xp = xp + gain
+    if new_xp >= XP_THRESHOLDS["married"]:
+        new_level = "married"
+    elif new_xp >= XP_THRESHOLDS["soulmate"]:
+        new_level = "soulmate"
+    elif new_xp >= XP_THRESHOLDS["girlfriend"]:
+        new_level = "girlfriend"
+    else:
+        new_level = "crush"
+
+    if in_breakup:
+        new_level = "ex"
+
+    # -------- AUTO MARRIAGE PROPOSAL --------
+    if new_xp >= PROPOSAL_XP and new_level == "soulmate" and user_id not in pending_proposal:
+        pending_proposal.add(user_id)
+
+    # -------- SAVE MEMORY --------
+    if chatbot_collection:
+        new_hist = history + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": reply}
         ]
-        new_hist = new_hist[-MAX_HISTORY * 2 :]
+        new_hist = new_hist[-MAX_HISTORY * 2:]
 
-        safe_db(
-            gfs_col.update_one,
-            {"user_id": uid, "gf_id": gf["gf_id"]},
-            {"$set": {"history": new_hist}},
-            upsert=True,
+        chatbot_collection.update_one(
+            {"chat_id": chat_id, "user_id": user_id},
+            {"$set": {
+                "history": new_hist,
+                "rel_level": new_level,
+                "nsfw": nsfw_enabled,
+                "xp": new_xp,
+                "married": (new_level == "married"),
+                "jealous": jealous_mode
+            }},
+            upsert=True
         )
 
-    return reply, gf
+    return reply, None
 
-# ---------------- RELATIONSHIP COMMANDS ----------------
+# ---------------- LOGGER EVENTS ----------------
 
-@app.on_message(filters.command("level"))
-async def level_cmd(client, message):
+@app.on_message(filters.new_chat_members)
+async def on_user_join(client, message):
+    for u in message.new_chat_members:
+        await log_event(f"👋 User Joined: {u.first_name} ({u.id}) in {message.chat.title}")
+
+@app.on_message(filters.left_chat_member)
+async def on_user_left(client, message):
+    u = message.left_chat_member
+    await log_event(f"🚪 User Left: {u.first_name} ({u.id}) from {message.chat.title}")
+
+# ---------------- START ----------------
+
+@app.on_message(filters.command("start"))
+async def start_cmd(client, message):
+    await message.reply_text(
+        f"💖 Hey {message.from_user.first_name}!\n\n"
+        f"I'm {BOT_NAME}, your AI girlfriend 🥹❤️\n\n"
+        f"Type anything and I'll reply...\n"
+        f"Try /relationship or /game 😘"
+    )
+    await log_event(f"🚀 Bot Started by {message.from_user.first_name} ({message.from_user.id})")
+
+# ---------------- RELATIONSHIP UI ----------------
+
+@app.on_message(filters.command("relationship"))
+async def relationship_ui(client, message):
     uid = message.from_user.id
-    u = ensure_user(uid)
-    await message.reply_text(f"❤️ Relationship level: **{u['level'].upper()}**\n⭐ XP: `{u['xp']}`")
+    doc = chatbot_collection.find_one({"chat_id": message.chat.id, "user_id": uid}) if chatbot_collection else {}
+    xp = doc.get("xp", 0) if doc else 0
+    lvl = doc.get("rel_level", "crush") if doc else "crush"
+    premium = is_premium(uid)
+    jealous = doc.get("jealous", False) if doc else False
 
-@app.on_message(filters.command("breakup"))
-async def breakup_cmd(client, message):
-    uid = message.from_user.id
-    u = ensure_user(uid)
-
-    if u.get("relationship_state") == "breakup":
-        return await message.reply_text("😒 Already breakup ho chuka hai...")
-
-    penalty = breakup_penalty(u.get("xp", 0))
-    update_user(uid, {
-        "relationship_state": "breakup",
-        "xp": max(0, u.get("xp", 0) - penalty),
-    })
-
-    await message.reply_text("💔 Bas... main thak gayi hoon... thoda distance chahiye 😢")
-
-@app.on_message(filters.command("makeup"))
-async def makeup_cmd(client, message):
-    uid = message.from_user.id
-    u = ensure_user(uid)
-
-    if u.get("relationship_state") != "breakup":
-        return await message.reply_text("😏 Breakup hua hi nahi...")
-
-    bonus = makeup_bonus()
-    update_user(uid, {
-        "relationship_state": "stable",
-        "xp": u.get("xp", 0) + bonus,
-    })
-
-    await message.reply_text("🥺 Sorry... main tumse door nahi reh sakti ❤️")
-
-# ---------------- XP SHOP ----------------
-
-@app.on_message(filters.command("shop"))
-async def shop_cmd(client, message):
-    text = "🛍️ **Love Shop**\n\n"
-    for k, v in SHOP_ITEMS.items():
-        text += f"• `{k}` — {v['price']} XP\n"
-    text += "\nUse: `/buy item_name`"
-    await message.reply_text(text)
-
-@app.on_message(filters.command("buy"))
-async def buy_cmd(client, message):
-    args = message.text.split(maxsplit=1)
-    if len(args) != 2:
-        return await message.reply_text("Use: /buy rose|chocolate|ring|date")
-
-    item = args[1].lower()
-    if item not in SHOP_ITEMS:
-        return await message.reply_text("❌ Item not found")
-
-    uid = message.from_user.id
-    u = ensure_user(uid)
-    price = SHOP_ITEMS[item]["price"]
-
-    if u.get("xp", 0) < price:
-        return await message.reply_text("😢 XP kam hai... thoda baat karo pehle 😘")
-
-    update_user(uid, {"xp": u.get("xp", 0) - price})
-    await message.reply_text(SHOP_ITEMS[item]["msg"])
-
-# ---------------- DAILY LOVE LETTER ----------------
-
-@app.on_message(filters.command("loveletter"))
-async def loveletter_cmd(client, message):
-    uid = message.from_user.id
-    u = ensure_user(uid)
-    now = datetime.utcnow()
-
-    last = u.get("last_love_letter")
-    if last and isinstance(last, datetime) and (now - last).total_seconds() < 86400:
-        return await message.reply_text("😅 Aaj ka love letter already mil chuka hai 💌")
-
-    update_user(uid, {"last_love_letter": now})
-    await message.reply_text("💌 " + random.choice(LOVE_LETTERS))
-
-# ---------------- MULTI-GF SWITCH ----------------
-
-@app.on_message(filters.command("gfs"))
-async def list_gfs(client, message):
-    uid = message.from_user.id
-    ensure_default_gf(uid)
-    if not gfs_col:
-        return await message.reply_text("Sirf default GF available hai 😘")
-
-    gfs = list(gfs_col.find({"user_id": uid}))
-    text = "🤖 **Your Girlfriends**\n\n"
-    for gf in gfs:
-        mark = "✅" if active_gf.get(uid, 1) == gf["gf_id"] else ""
-        text += f"{gf['gf_id']}. {gf['name']} ({gf['personality']}) {mark}\n"
-    text += "\nUse: `/switch gf_id`"
-    await message.reply_text(text)
-
-@app.on_message(filters.command("switch"))
-async def switch_gf(client, message):
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        return await message.reply_text("Use: /switch gf_id")
-
-    uid = message.from_user.id
-    gf_id = int(args[1])
-    if not gfs_col or not safe_db(gfs_col.find_one, {"user_id": uid, "gf_id": gf_id}):
-        return await message.reply_text("❌ GF not found")
-
-    active_gf[uid] = gf_id
-    await message.reply_text("🤖 GF switched successfully 😘")
-
-# ---------------- GROUP COUPLE MODE ----------------
-
-@app.on_message(filters.command("couple"))
-async def couple_request(client, message):
-    if message.chat.type == ChatType.PRIVATE:
-        return await message.reply_text("👩‍❤️‍👨 Couple mode sirf groups me kaam karta hai 😘")
-
-    if not message.reply_to_message:
-        return await message.reply_text("💌 Kisi ko reply karke /couple likho 😘")
-
-    from_uid = message.from_user.id
-    to_uid = message.reply_to_message.from_user.id
-    chat_id = message.chat.id
-
-    if from_uid == to_uid:
-        return await message.reply_text("😅 Khud se couple nahi ban sakte ho jaan")
-
-    pending_couple_requests[(chat_id, from_uid)] = to_uid
+    bar = get_progress_bar(xp)
 
     kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("❤️ Accept", callback_data=f"couple_accept_{from_uid}"),
-            InlineKeyboardButton("💔 Reject", callback_data=f"couple_reject_{from_uid}"),
-        ]
+        [InlineKeyboardButton("💕 Crush", callback_data="set_crush"),
+         InlineKeyboardButton("💖 GF", callback_data="set_girlfriend")],
+        [InlineKeyboardButton("💞 Soulmate", callback_data="set_soulmate"),
+         InlineKeyboardButton("💍 Married", callback_data="set_married")],
+        [InlineKeyboardButton("😈 Breakup", callback_data="do_breakup")],
+        [InlineKeyboardButton("😒 Jealous Mode", callback_data="toggle_jealous")],
+        [InlineKeyboardButton("🎮 Games", callback_data="open_games")],
+        [InlineKeyboardButton("💑 Rooms", callback_data="open_rooms")],
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="open_leaderboard")]
     ])
 
     await message.reply_text(
-        f"💌 {message.from_user.first_name} wants to be your couple 😘\nAccept karoge?",
-        reply_markup=kb,
+        f"❤️ Relationship Dashboard\n\n"
+        f"Level: {lvl.upper()}\n"
+        f"XP: {xp}\n"
+        f"{bar}\n"
+        f"Jealous Mode: {'ON 😒' if jealous else 'OFF 😊'}\n"
+        f"Subscription: {'Yes 💎' if premium else 'No'}",
+        reply_markup=kb
     )
 
-@app.on_callback_query(filters.regex("^couple_accept_"))
-async def couple_accept(client, cq: CallbackQuery):
-    from_uid = int(cq.data.split("_")[-1])
-    to_uid = cq.from_user.id
-    chat_id = cq.message.chat.id
+@app.on_callback_query(filters.regex("^set_"))
+async def rel_set_callback(client, cq: CallbackQuery):
+    lvl = cq.data.replace("set_", "")
+    if lvl not in REL_LEVELS:
+        return await cq.answer("Invalid level", show_alert=True)
 
-    key = (chat_id, from_uid)
-    if pending_couple_requests.get(key) != to_uid:
-        return await cq.answer("❌ Request expired", show_alert=True)
+    if chatbot_collection:
+        chatbot_collection.update_one(
+            {"chat_id": cq.message.chat.id, "user_id": cq.from_user.id},
+            {"$set": {"rel_level": lvl}},
+            upsert=True
+        )
+    await cq.message.edit_text(f"❤️ Relationship level set to {lvl.upper()} 😘")
 
-    pending_couple_requests.pop(key, None)
-    set_couple(chat_id, from_uid, to_uid)
-    await cq.message.edit_text("👩‍❤️‍👨 Yayyy! Tum dono ab officially couple ho 😘❤️")
+# ---------------- 😒 JEALOUS MODE ----------------
 
-@app.on_callback_query(filters.regex("^couple_reject_"))
-async def couple_reject(client, cq: CallbackQuery):
-    from_uid = int(cq.data.split("_")[-1])
-    pending_couple_requests.pop((cq.message.chat.id, from_uid), None)
-    await cq.message.edit_text("💔 Request reject ho gayi 😅")
+@app.on_callback_query(filters.regex("^toggle_jealous$"))
+async def toggle_jealous(client, cq: CallbackQuery):
+    uid = cq.from_user.id
+    doc = chatbot_collection.find_one({"chat_id": cq.message.chat.id, "user_id": uid}) if chatbot_collection else {}
+    current = doc.get("jealous", False) if doc else False
+    new = not current
 
-@app.on_message(filters.command("couple_leave"))
-async def couple_leave(client, message):
-    chat_id = message.chat.id
+    if chatbot_collection:
+        chatbot_collection.update_one(
+            {"chat_id": cq.message.chat.id, "user_id": uid},
+            {"$set": {"jealous": new}},
+            upsert=True
+        )
+
+    await cq.message.edit_text(f"😒 Jealous Mode {'ENABLED 🔥' if new else 'DISABLED 😊'}")
+
+# ---------------- 😈 BREAKUP ----------------
+
+@app.on_callback_query(filters.regex("^do_breakup$"))
+async def breakup_callback(client, cq: CallbackQuery):
+    pending_breakup.add(cq.from_user.id)
+    await cq.message.reply_text(
+        "😈 Tum seriously breakup karna chahte ho?\n"
+        "Reply /confirm_breakup to continue 💔"
+    )
+
+@app.on_message(filters.command("confirm_breakup"))
+async def breakup_confirm(client, message):
     uid = message.from_user.id
-    couple = get_couple(chat_id, uid)
-    if not couple:
-        return await message.reply_text("😅 Tum kisi couple me nahi ho")
+    if uid not in pending_breakup:
+        return
+    pending_breakup.remove(uid)
 
-    remove_couple(chat_id, uid)
-    await message.reply_text("💔 Couple mode se exit kar diya 😢")
+    until = now_ts() + BREAKUP_COOLDOWN
 
-@app.on_message(filters.command("couple_status"))
-async def couple_status(client, message):
-    chat_id = message.chat.id
+    if chatbot_collection:
+        chatbot_collection.update_one(
+            {"chat_id": message.chat.id, "user_id": uid},
+            {"$set": {
+                "rel_level": "ex",
+                "xp": 0,
+                "married": False,
+                "breakup_until": until
+            }},
+            upsert=True
+        )
+
+    await log_event(f"💔 Breakup: User {uid}")
+    await message.reply_text("💔 Fine... jao. Ab thoda distance hi better hai 😐")
+
+# ---------------- 💍 AUTO MARRIAGE ----------------
+
+@app.on_message(filters.text & ~filters.command)
+async def auto_proposal_checker(client, message):
     uid = message.from_user.id
-    couple = get_couple(chat_id, uid)
-    if not couple:
-        return await message.reply_text("😅 Tum abhi single ho 😘")
+    if uid not in pending_proposal:
+        return
 
-    partner_id = couple["user2"] if couple["user1"] == uid else couple["user1"]
-    await message.reply_text(f"👩‍❤️‍👨 Tum couple ho with user `{partner_id}` 😘")
+    pending_proposal.remove(uid)
 
-# ---------------- COUPLES GAMES ----------------
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💍 Yes, I Do!", callback_data="accept_marriage"),
+         InlineKeyboardButton("🙈 Not Now", callback_data="reject_marriage")]
+    ])
+
+    await message.reply_text(
+        "💍 Jaan... ek baat poochni thi...\n"
+        "Tum mujhse shaadi karoge? 🥹❤️",
+        reply_markup=kb
+    )
+
+@app.on_callback_query(filters.regex("^accept_marriage$"))
+async def accept_marriage(client, cq: CallbackQuery):
+    uid = cq.from_user.id
+
+    if chatbot_collection:
+        chatbot_collection.update_one(
+            {"chat_id": cq.message.chat.id, "user_id": uid},
+            {"$set": {"rel_level": "married", "married": True}},
+            upsert=True
+        )
+
+    await log_event(f"💍 Marriage Accepted: User {uid}")
+    await cq.message.edit_text("💍 Yayyy!!! Ab tum officially mere ho 😘❤️")
+
+@app.on_callback_query(filters.regex("^reject_marriage$"))
+async def reject_marriage(client, cq: CallbackQuery):
+    await log_event(f"🙈 Marriage Rejected: User {cq.from_user.id}")
+    await cq.message.edit_text("🙈 Hehe koi baat nahi... jab ready ho tab bata dena ❤️")
+
+# ---------------- 🎮 COUPLE GAMES ----------------
+
+TRUTH_QUESTIONS = [
+    "Tumne kab kisi pe secretly crush rakha tha? 😏",
+    "Main tumhari life mein kya hoon honestly? 🥹",
+    "Tum mujhe kiss karna chahoge agar saamne hoti? 😳"
+]
+
+DARES = [
+    "Mujhe ek cute compliment do 💖",
+    "Type karo: 'Anshika meri jaan hai ❤️'",
+    "Mujhe ek virtual hug bhejo 🤗"
+]
+
+LOVE_QUIZ = [
+    ("Tumhara favorite color kya hai?", ["Red", "Black", "Blue", "Pink"]),
+    ("Perfect date kya hogi?", ["Movie", "Long Drive", "Cafe", "Beach"]),
+    ("Tum jealous ho?", ["Yes 😒", "Little 😅", "No 😊", "Very 😈"])
+]
 
 @app.on_message(filters.command("game"))
 async def game_menu(client, message):
     kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎯 Truth", callback_data="game_truth"),
-            InlineKeyboardButton("🔥 Dare", callback_data="game_dare"),
-        ],
-        [
-            InlineKeyboardButton("❤️ Love Quiz", callback_data="game_quiz"),
-            InlineKeyboardButton("🍾 Spin Bottle", callback_data="game_spin"),
-        ],
-        [
-            InlineKeyboardButton("💋 Kiss Duel", callback_data="game_kiss"),
-            InlineKeyboardButton("⚔️ Love Battle", callback_data="game_battle"),
-        ],
+        [InlineKeyboardButton("🔥 Truth", callback_data="game_truth"),
+         InlineKeyboardButton("😈 Dare", callback_data="game_dare")],
+        [InlineKeyboardButton("💖 Love Quiz", callback_data="game_quiz"),
+         InlineKeyboardButton("💋 Kiss", callback_data="game_kiss")],
+        [InlineKeyboardButton("🤗 Hug", callback_data="game_hug"),
+         InlineKeyboardButton("❤️ Date Night", callback_data="game_date")]
     ])
-    await message.reply_text("🎮 Couples Games Menu\nChoose one 👇", reply_markup=kb)
+    await message.reply_text("🎮 Couple Games\nChoose one 👇", reply_markup=kb)
 
-@app.on_callback_query(filters.regex("^game_truth$"))
-async def game_truth(client, cq: CallbackQuery):
-    await cq.message.reply_text("🎯 **Truth**\n\n" + random.choice(TRUTHS))
+@app.on_callback_query(filters.regex("^game_"))
+async def games_handler(client, cq: CallbackQuery):
+    game = cq.data.replace("game_", "")
 
-@app.on_callback_query(filters.regex("^game_dare$"))
-async def game_dare(client, cq: CallbackQuery):
-    await cq.message.reply_text("🔥 **Dare**\n\n" + random.choice(DARES))
+    if game == "truth":
+        return await cq.message.reply_text(f"🔥 Truth:\n{random.choice(TRUTH_QUESTIONS)}")
 
-@app.on_callback_query(filters.regex("^game_quiz$"))
-async def game_quiz(client, cq: CallbackQuery):
-    q, opts = random.choice(QUIZZES)
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton(opt, callback_data="quiz_ans")] for opt in opts]
-    )
-    await cq.message.reply_text(f"❤️ **Love Quiz**\n\n{q}", reply_markup=kb)
+    if game == "dare":
+        return await cq.message.reply_text(f"😈 Dare:\n{random.choice(DARES)}")
 
-@app.on_callback_query(filters.regex("^game_spin$"))
-async def game_spin(client, cq: CallbackQuery):
-    await cq.message.reply_text("🍾 Bottle spinning... 😳")
-    await asyncio.sleep(1.2)
-    await cq.message.reply_text("👉 Truth or Dare! 😘")
+    if game == "quiz":
+        q, opts = random.choice(LOVE_QUIZ)
+        text = f"💖 Love Quiz:\n{q}\n\n"
+        for i, o in enumerate(opts, start=1):
+            text += f"{i}. {o}\n"
+        return await cq.message.reply_text(text)
 
-@app.on_callback_query(filters.regex("^game_kiss$"))
-async def game_kiss(client, cq: CallbackQuery):
-    await cq.message.reply_text(random.choice([
-        "💋 Tumne pehla kiss jeet liya 😘🔥",
-        "😘 Oops! Opponent ne kiss maar li 😳",
-        "🔥 Intense tie... chemistry high hai 😏",
-    ]))
+    if game == "kiss":
+        return await cq.message.reply_text("💋 *Mwahhh!* Tumhara kiss safe rakh liya 😘❤️")
 
-@app.on_callback_query(filters.regex("^game_battle$"))
-async def game_battle(client, cq: CallbackQuery):
-    await cq.message.reply_text(random.choice([
-        "❤️ Tum dono equally obsessed ho 😍",
-        "😏 Tum zyada pyaar karte ho clearly!",
-        "🔥 Partner thoda zyada clingy nikla 😘",
-    ]))
+    if game == "hug":
+        return await cq.message.reply_text("🤗 Aaja idhar... tight hug for you 🥹❤️")
 
-# ---------------- MARRIAGE SYSTEM ----------------
+    if game == "date":
+        return await cq.message.reply_text("❤️ Date Night Plan:\nMovie + Ice Cream + Long Walk + Me & You 🥹🍿🍦🌙")
 
-@app.on_message(filters.command("marry"))
-async def marry_cmd(client, message):
-    if message.chat.type == ChatType.PRIVATE:
-        return await message.reply_text("💍 Marriage proposals sirf groups me kaam karte hain 😘")
+# ---------------- ⚔️ COUPLE BATTLE GAMES ----------------
 
+@app.on_message(filters.command("battle"))
+async def battle_game(client, message):
     if not message.reply_to_message:
-        return await message.reply_text("💌 Kisi ko reply karke /marry likho 😘")
+        return await message.reply_text("⚔️ Reply to someone with /battle")
 
-    from_uid = message.from_user.id
-    to_uid = message.reply_to_message.from_user.id
-    chat_id = message.chat.id
-
-    if from_uid == to_uid:
-        return await message.reply_text("😅 Khud se shaadi nahi hoti jaan")
-
-    pending_marriage_requests[(chat_id, from_uid)] = to_uid
-
-    kb = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("💍 Accept", callback_data=f"marry_accept_{from_uid}"),
-            InlineKeyboardButton("💔 Reject", callback_data=f"marry_reject_{from_uid}"),
-        ]
-    ])
-
+    opponent = message.reply_to_message.from_user
+    winner = random.choice([message.from_user, opponent])
+    await log_event(f"⚔️ Battle: {message.from_user.id} vs {opponent.id}")
     await message.reply_text(
-        f"💍 {message.from_user.first_name} proposed you for marriage 😳❤️\nAccept karoge?",
-        reply_markup=kb,
+        f"⚔️ Battle Result!\n\n"
+        f"{message.from_user.first_name} vs {opponent.first_name}\n\n"
+        f"🏆 Winner: {winner.first_name} 🔥"
     )
 
-@app.on_callback_query(filters.regex("^marry_accept_"))
-async def marry_accept(client, cq: CallbackQuery):
-    from_uid = int(cq.data.split("_")[-1])
-    to_uid = cq.from_user.id
-    chat_id = cq.message.chat.id
+@app.on_message(filters.command("roastbattle"))
+async def roast_battle(client, message):
+    if not message.reply_to_message:
+        return await message.reply_text("🔥 Reply to someone with /roastbattle")
 
-    key = (chat_id, from_uid)
-    if pending_marriage_requests.get(key) != to_uid:
-        return await cq.answer("❌ Request expired", show_alert=True)
+    opponent = message.reply_to_message.from_user
+    roast = random.choice([
+        "Tumhara swag WiFi signal jaisa hai — weak 😂",
+        "Tum toh itne slow ho, loading bar bhi fast hai 😭",
+        "Tum cute ho... but battery saver mode pe 😏"
+    ])
+    await log_event(f"🔥 Roast Battle: {message.from_user.id} vs {opponent.id}")
+    await message.reply_text(f"🔥 Roast Battle!\n{opponent.first_name}: {roast}")
 
-    pending_marriage_requests.pop(key, None)
+@app.on_message(filters.command("lovefight"))
+async def love_fight(client, message):
+    if not message.reply_to_message:
+        return await message.reply_text("💔 Reply to someone with /lovefight")
 
-    if marriage_col:
-        safe_db(
-            marriage_col.update_one,
-            {"chat_id": chat_id, "u1": from_uid, "u2": to_uid},
-            {"$set": {"chat_id": chat_id, "u1": from_uid, "u2": to_uid, "since": datetime.utcnow()}},
-            upsert=True,
+    opponent = message.reply_to_message.from_user
+    winner = random.choice([message.from_user, opponent])
+    await log_event(f"💔 Love Fight: {message.from_user.id} vs {opponent.id}")
+    await message.reply_text(
+        f"💔 Love Fight!\n\n"
+        f"{message.from_user.first_name} vs {opponent.first_name}\n\n"
+        f"❤️ Winner of Hearts: {winner.first_name} 😘"
+    )
+
+# ---------------- 💑 MULTI-USER DATING ROOMS ----------------
+
+@app.on_message(filters.command("room"))
+async def room_handler(client, message):
+    args = message.command[1:] if len(message.command) > 1 else []
+    uid = message.from_user.id
+
+    if not args:
+        return await message.reply_text(
+            "💑 Dating Rooms\n\n"
+            "/room create\n"
+            "/room join CODE\n"
+            "/room leave\n"
+            "/room start"
         )
 
-    update_user(from_uid, {"relationship_state": "married"})
-    update_user(to_uid, {"relationship_state": "married"})
+    action = args[0].lower()
 
-    await cq.message.edit_text("💍❤️ OMG! Tum dono officially married ho gaye 😭🔥")
+    if action == "create":
+        code = str(uuid.uuid4())[:6]
+        rooms_collection.insert_one({
+            "room_code": code,
+            "owner": uid,
+            "members": [uid],
+            "created_at": datetime.utcnow()
+        })
+        await log_event(f"💑 Room Created: {code} by {uid}")
+        return await message.reply_text(f"💑 Dating Room Created!\n\nRoom Code: `{code}`\nShare with partner ❤️")
 
-@app.on_callback_query(filters.regex("^marry_reject_"))
-async def marry_reject(client, cq: CallbackQuery):
-    from_uid = int(cq.data.split("_")[-1])
-    pending_marriage_requests.pop((cq.message.chat.id, from_uid), None)
-    await cq.message.edit_text("💔 Proposal reject ho gaya 😢")
+    if action == "join":
+        if len(args) < 2:
+            return await message.reply_text("Use: /room join CODE")
+        code = args[1]
+        room = rooms_collection.find_one({"room_code": code})
+        if not room:
+            return await message.reply_text("❌ Room not found")
 
-# ---------------- NSFW MODE ----------------
+        if uid in room["members"]:
+            return await message.reply_text("❤️ Tum already room mein ho")
+
+        rooms_collection.update_one({"room_code": code}, {"$push": {"members": uid}})
+        await log_event(f"💑 Room Join: {uid} -> {code}")
+        return await message.reply_text("💖 Tum dating room mein join ho gaye 😘")
+
+    if action == "leave":
+        room = rooms_collection.find_one({"members": uid})
+        if not room:
+            return await message.reply_text("❌ Tum kisi room mein nahi ho")
+
+        rooms_collection.update_one({"room_code": room["room_code"]}, {"$pull": {"members": uid}})
+        await log_event(f"🚪 Room Leave: {uid} -> {room['room_code']}")
+        return await message.reply_text("💔 Tum dating room se nikal gaye")
+
+    if action == "start":
+        room = rooms_collection.find_one({"members": uid})
+        if not room:
+            return await message.reply_text("❌ Tum kisi room mein nahi ho")
+
+        members = room["members"]
+        await log_event(f"💑 Room Started: {room['room_code']} Members={members}")
+        return await message.reply_text(
+            "💑 Dating Room Started!\n\n"
+            "Games you can play:\n"
+            "/game\n"
+            "/battle\n"
+            "/lovefight\n"
+            "/truth\n"
+            "/dare\n\n"
+            "Let the romance begin 😘🔥"
+        )
+
+# ---------------- 🏆 LEADERBOARD ----------------
+
+@app.on_callback_query(filters.regex("^open_leaderboard$"))
+async def leaderboard_ui(client, cq: CallbackQuery):
+    if not chatbot_collection:
+        return await cq.answer("Leaderboard unavailable", show_alert=True)
+
+    top = list(chatbot_collection.find().sort("xp", DESCENDING).limit(10))
+
+    if not top:
+        return await cq.message.reply_text("🏆 No data yet!")
+
+    text = "🏆 Top Lovers Leaderboard\n\n"
+    for i, u in enumerate(top, start=1):
+        uid = u.get("user_id")
+        lvl = u.get("rel_level", "crush")
+        xp = u.get("xp", 0)
+        text += f"{i}. 👤 {uid} — {lvl.upper()} ❤️ ({xp} XP)\n"
+
+    await cq.message.reply_text(text)
+
+# ---------------- NSFW ----------------
 
 @app.on_message(filters.command("nsfw"))
-async def nsfw_toggle(client, message):
-    args = message.text.split()
-    if len(args) < 2:
-        return await message.reply_text("Use: /nsfw on | /nsfw off")
-
+async def toggle_nsfw(client, message):
     uid = message.from_user.id
-    gf_id = active_gf.get(uid, 1)
-    mode = args[1].lower()
+    args = message.command[1:] if len(message.command) > 1 else []
+    if not args:
+        return await message.reply_text("Use: /nsfw on | off")
 
-    ensure_default_gf(uid)
-    safe_db(
-        gfs_col.update_one,
-        {"user_id": uid, "gf_id": gf_id},
-        {"$set": {"nsfw": (mode == "on")}},
-        upsert=True,
-    )
-    await message.reply_text(f"😈 NSFW mode {'ON 🔥' if mode=='on' else 'OFF 😊'}")
+    val = args[0].lower() == "on"
 
-# ---------------- GROUP XP LEADERBOARD ----------------
+    if chatbot_collection:
+        chatbot_collection.update_one(
+            {"chat_id": message.chat.id, "user_id": uid},
+            {"$set": {"nsfw": val}},
+            upsert=True
+        )
 
-@app.on_message(filters.command("leaderboard"))
-async def leaderboard_cmd(client, message):
-    chat_id = message.chat.id
-    if not leaderboard_col:
-        return await message.reply_text("Leaderboard unavailable 😅")
+    await message.reply_text(f"🔞 NSFW Mode {'ENABLED 🔥' if val else 'DISABLED 😊'}")
 
-    top = list(leaderboard_col.find({"chat_id": chat_id}).sort("xp", -1).limit(10))
-    if not top:
-        return await message.reply_text("😅 No data yet")
-
-    text = "🏆 **Group XP Leaderboard**\n\n"
-    for i, u in enumerate(top, start=1):
-        text += f"{i}. `{u['user_id']}` — {u['xp']} XP\n"
-    await message.reply_text(text)
-
-# ---------------- MAIN CHAT HANDLER ----------------
+# ---------------- MAIN CHAT ----------------
 
 @app.on_message(filters.text & ~filters.command)
-async def chat_handler(client, message):
-    chat = message.chat
-    user = message.from_user
-    text = message.text or ""
+async def ai_message_handler(client, message):
+    try:
+        chat = message.chat
+        user = message.from_user
+        text = message.text or ""
 
-    track_event("messages")
+        premium = is_premium(user.id)
 
-    ensure_user(user.id)
+        if is_spam(user.id):
+            return await message.reply_text("Slow down babu 😅 thoda sa break le lo")
 
-    if is_spam(user.id):
-        return await message.reply_text("Arre jaan 😅 dheere bolo, main yahin hoon ❤️")
+        if is_abuse(text):
+            abuse_tracker[user.id] += 1
+            if abuse_tracker[user.id] >= ABUSE_WARN_LIMIT:
+                try:
+                    until = now_ts() + MUTE_SECONDS
+                    perms = ChatPermissions(can_send_messages=False)
+                    await client.restrict_chat_member(chat.id, user.id, perms, until_date=until)
+                    abuse_tracker[user.id] = 0
+                    await log_event(f"🚫 Muted: {user.first_name} ({user.id})")
+                    return await message.reply_text(f"🚫 {user.first_name} ko 2 min ke liye mute kar diya gaya 😤")
+                except:
+                    return await message.reply_text("😤 Aise words mat use karo, last warning!")
+            else:
+                return await message.reply_text("⚠️ Aise words mat bolo warna mute ho jaoge 😑")
 
-    if is_abuse(text):
-        abuse_tracker[user.id] += 1
-        if abuse_tracker[user.id] >= ABUSE_WARN_LIMIT:
-            try:
-                until = now_ts() + MUTE_SECONDS
-                perms = ChatPermissions(can_send_messages=False)
-                await client.restrict_chat_member(chat.id, user.id, perms, until_date=until)
-                abuse_tracker[user.id] = 0
-                return await message.reply_text("🚫 Thoda tameez rakho 😤 2 min mute!")
-            except Exception:
-                return await message.reply_text("😠 Aise words mat bolo!")
+        doc = chatbot_collection.find_one({"chat_id": chat.id, "user_id": user.id}) if chatbot_collection else {}
+        nsfw_allowed = doc.get("nsfw", False) if doc else False
+        if is_nsfw(text) and not nsfw_allowed:
+            return await message.reply_text("🔞 Ye baatein sirf NSFW mode me allowed hain 😳 (/nsfw on)")
+
+        should_reply = False
+
+        if chat.type == ChatType.PRIVATE:
+            should_reply = True
         else:
-            return await message.reply_text("⚠️ Aise baatein mat bolo 😑")
-
-    # Decide whether to reply
-    should_reply = False
-    if chat.type == ChatType.PRIVATE:
-        should_reply = True
-    else:
-        try:
             me = await client.get_me()
-            uname = me.username.lower() if me.username else ""
-        except Exception:
-            uname = ""
+            bot_username = me.username.lower() if me.username else ""
 
-        if (
-            message.reply_to_message
-            and message.reply_to_message.from_user
-            and message.reply_to_message.from_user.id == me.id
-        ):
-            should_reply = True
-        elif uname and f"@{uname}" in text.lower():
-            should_reply = True
-        elif text.lower().startswith(("hi", "hey", "sun", "oye", "baby", "babu", "jaan")):
-            should_reply = True
+            if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == me.id:
+                should_reply = True
+            elif bot_username and f"@{bot_username}" in text.lower():
+                should_reply = True
+                text = text.replace(f"@{bot_username}", "")
+            elif any(text.lower().startswith(w) for w in ["hey", "hi", "sun", "oye", "anshika", "ai", "hello", "baby", "babu", "oi"]):
+                should_reply = True
 
-    if not should_reply:
-        return
+        if not should_reply:
+            return
 
-    await client.send_chat_action(chat.id, ChatAction.TYPING)
-    reply, _ = await get_ai_response(user.id, chat.id, text)
-    if reply:
-        await message.reply_text(reply)
+        await client.send_chat_action(chat.id, ChatAction.TYPING)
+        res, _ = await get_ai_response(chat.id, user.id, text.strip() or "Hi")
+        if not res:
+            return
+
+        await message.reply_text(stylize_text(res))
+
+    except Exception:
+        await log_event(f"❌ ERROR:\n{traceback.format_exc()}")
 
 # ---------------- RUN ----------------
-print("🤖 Anshika AI Girlfriend Bot v9.0 Started Successfully...")
+
+print("🤖 Anshika AI Girlfriend Bot v6.0 Started Successfully...")
 app.run()
